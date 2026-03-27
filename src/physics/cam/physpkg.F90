@@ -1179,14 +1179,14 @@ contains
     if((Force_Model).and.(Force_ON)) then
       nstep = get_nstep()
       if(masterproc) then 
-      write(iulog,*) "before force: phys_state(begchunk)%u: ", phys_state(begchunk)%u(1,20)
+        write(iulog,*) "before force: phys_state(begchunk)%u: ", phys_state(begchunk)%u(1,20)
       endif
       if (nstep > 0) then 
-      do c=begchunk,endchunk
-         call corrector_timestep_tend(phys_state(c),ptend)
-         call physics_update(phys_state(c),ptend,ztodt,phys_tend(c))
-         call check_energy_chng(phys_state(c), phys_tend(c), "corrector", nstep, ztodt, zero, zero, zero, zero)
-      end do
+        do c=begchunk,endchunk
+           call corrector_timestep_tend(phys_state(c),ptend)
+           call physics_update(phys_state(c),ptend,ztodt,phys_tend(c))
+           call check_energy_chng(phys_state(c), phys_tend(c), "corrector", nstep, ztodt, zero, zero, zero, zero)
+        end do
       else
          if(masterproc) then 
          write(iulog,*) "timestep 0 no update "
@@ -1195,12 +1195,12 @@ contains
       if(masterproc) then 
          write(iulog,*) "after force: phys_state(begchunk)%u: ", phys_state(begchunk)%u(1,20)
       endif
-      endif
-      ! update analysis and timestep for one step after timestep_tend
-      if(masterproc) then 
-         write(iulog,*) "corrector timestep init "
-      endif
-      if (Force_Model) call corrector_timestep_init(phys_state)
+    endif
+    ! update analysis and timestep for one step after timestep_tend
+    if(masterproc) then 
+       write(iulog,*) "corrector timestep init "
+    endif
+    if (Force_Model) call corrector_timestep_init(phys_state)
 
     do c=begchunk,endchunk
        ncol = get_ncols_p(c)
