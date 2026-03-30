@@ -282,8 +282,6 @@ module corrector
   real(r8),allocatable::Model_state_LANDFRAC    (:,:)    !(pcols,begchunk:endchunk)
   real(r8),allocatable::Model_state_lat    (:,:)    !(pcols,begchunk:endchunk)
   real(r8),allocatable::Model_state_lon    (:,:)    !(pcols,begchunk:endchunk)
-  real(r8),allocatable::Model_state_tod    (:,:)    !(pcols,begchunk:endchunk)
-  real(r8),allocatable::Model_state_toy    (:,:)    !(pcols,begchunk:endchunk)
 
   ! nncorrector tendency arrays
   real(r8),allocatable::nnTarget_U  (:,:,:)  !(pcols,pver,begchunk:endchunk)
@@ -653,10 +651,6 @@ contains
    call alloc_err(istat,'corrector_init','Model_state_lat',pcols*((endchunk-begchunk)+1))
    allocate(Model_state_lon(pcols,begchunk:endchunk),stat=istat)
    call alloc_err(istat,'corrector_init','Model_state_lon',pcols*((endchunk-begchunk)+1))
-   allocate(Model_state_tod(pcols,begchunk:endchunk),stat=istat)
-   call alloc_err(istat,'corrector_init','Model_state_tod',pcols*((endchunk-begchunk)+1))
-   allocate(Model_state_toy(pcols,begchunk:endchunk),stat=istat)
-   call alloc_err(istat,'corrector_init','Model_state_toy',pcols*((endchunk-begchunk)+1))
 
    allocate(nnTarget_U(pcols,pver,begchunk:endchunk),stat=istat)
    call alloc_err(istat,'corrector_init','nnTarget_U',pcols*pver*((endchunk-begchunk)+1))
@@ -971,8 +965,6 @@ contains
      Model_state_LANDFRAC(:pcols,lchnk)=0._r8
      Model_state_lat(:pcols,lchnk)=0._r8
      Model_state_lon(:pcols,lchnk)=0._r8
-     Model_state_tod(:pcols,lchnk)=0._r8
-     Model_state_toy(:pcols,lchnk)=0._r8
 
      nnTarget_U(:pcols,:pver,lchnk)=0._r8
      nnTarget_V(:pcols,:pver,lchnk)=0._r8
@@ -1697,6 +1689,7 @@ contains
     real(r8) :: dt_avg = 0.0_r8   ! time step to use for the shr_orb_cosz calculation, if use_rad_dt_cosz set to true
     real(r8) :: eccf     ! Earth orbit eccentricity factor
     real(r8) :: calday       ! current calendar day
+    integer  :: toy_day      ! integer day-of-year for NN input
     real(r8) :: clat(pcols)  ! current latitudes(radians)
     real(r8) :: clon(pcols)  ! current longitudes(radians)
     real(r8), dimension(pcols,begchunk:endchunk) :: coszrs  ! Cosine solar zenith angle
@@ -1730,6 +1723,9 @@ contains
     nlat = Force_nlat
     plev = pver
 
+    calday  = get_curr_calday()
+    toy_day = max(1, min(366, int(calday + 1.0e-8_r3)))
+
     ! Zeyuan Hu 12/23/2024: gather global state variables
     !---------------------------------------------------
     do lchnk=begchunk,endchunk
@@ -1754,8 +1750,6 @@ contains
       Model_state_LANDFRAC(:ncol,lchnk)=cam_in(lchnk)%landfrac(:ncol)
       Model_state_lat(:ncol,lchnk)=phys_state(lchnk)%lat(:ncol)*(180./pi)
       Model_state_lon(:ncol,lchnk)=phys_state(lchnk)%lon(:ncol)*(180./pi)
-      Model_state_tod(:ncol,lchnk)=nnCorrector_Curr_Sec/3600. ! in hours
-      Model_state_toy(:ncol,lchnk)=nnCorrector_Curr_Day ! in day
     end do
 
     ! call get_ref_solar_band_irrad( solar_band_irrad ) ! this can move to init subroutine
@@ -1763,7 +1757,7 @@ contains
     call get_variability(sfac)                        ! "
     do lchnk=begchunk,endchunk
       ncol = phys_state(lchnk)%ncol
-      calday = get_curr_calday() ! get current calendar day; no time offset as was in E3SM, need to double check!
+      ! calday = get_curr_calday() ! get current calendar day; no time offset as was in E3SM, need to double check!
       ! coszrs
       call get_rlat_all_p(lchnk, ncol, clat)
       call get_rlon_all_p(lchnk, ncol, clon)
@@ -1959,7 +1953,7 @@ contains
     endif ! (masterproc) then
 
     tod_anal(:,:) = nnCorrector_Curr_Sec/3600. ! in hours
-    toy_anal(:,:) = nnCorrector_Curr_Day ! in day
+    toy_anal(:,:) = real(toy_day,r8) ! day of year
 
     call gather_chunk_to_field(1,1,1,Force_nlon,Model_state_lat,Xtransf)
     if (masterproc) then
