@@ -340,7 +340,7 @@ contains
                          Force_Vwin_Lindex,Force_Vwin_Hindex,          &
                          Force_Vwin_Ldelta,Force_Vwin_Hdelta,          &
                          Force_Vwin_Invert,                            &
-                         nnCorrector_Model, nnCorrector_ON,            &
+                         nnCorrector_Model,                            &
                          Force_torch_model, NN_Data_Save
 
    ! corrector is NOT initialized yet, For now
