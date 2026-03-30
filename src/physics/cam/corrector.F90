@@ -1653,8 +1653,530 @@ contains
     ! Local values
     !-------------
     
-    ! TODO
-    call endrun('nncorrector_update:: not implemented yet')
+    ! Local values
+    !-------------
+    integer lev
+    integer nlon,nlat,plev,istat
+    integer ncid,varid
+    integer ilat,ilon,ilev
+    real(r8) Xanal(Force_nlon,Force_nlat,Force_nlev)
+    real(r8) Uanal(Force_nlon,Force_nlat,Force_nlev)
+    real(r8) Vanal(Force_nlon,Force_nlat,Force_nlev)
+    real(r8) Tanal(Force_nlon,Force_nlat,Force_nlev)
+    real(r8) Qanal(Force_nlon,Force_nlat,Force_nlev)
+    real(r8) QLIQanal(Force_nlon,Force_nlat,Force_nlev)
+    real(r8) QICEanal(Force_nlon,Force_nlat,Force_nlev)
+    real(r8) OMEGAanal(Force_nlon,Force_nlat,Force_nlev)
+    real(r8) PSanal(Force_nlon,Force_nlat)
+    real(r8) SOLINanal(Force_nlon,Force_nlat)
+    real(r8) LHFLXanal(Force_nlon,Force_nlat)
+    real(r8) SHFLXanal(Force_nlon,Force_nlat)
+    real(r8) SNOWHLNDanal(Force_nlon, Force_nlat)
+    real(r8) PHISanal(Force_nlon, Force_nlat)
+    real(r8) TAUXanal(Force_nlon, Force_nlat)
+    real(r8) TAUYanal(Force_nlon, Force_nlat)
+    real(r8) TSanal(Force_nlon, Force_nlat)
+    real(r8) ICEFRACanal(Force_nlon, Force_nlat)
+    real(r8) LANDFRACanal(Force_nlon, Force_nlat)
+    real(r8) tod_anal(Force_nlon, Force_nlat)
+    real(r8) toy_anal(Force_nlon, Force_nlat)
+    real(r8) clat_anal(Force_nlon, Force_nlat)
+    real(r8) clon_anal(Force_nlon, Force_nlat)
+
+    real(r8) Lat_anal(Force_nlat)
+    real(r8) Lon_anal(Force_nlon)
+    real(r8) Xtrans(Force_nlon,Force_nlev,Force_nlat)
+    real(r8) Xtransf(1,Force_nlon,Force_nlat)
+    integer  nn,Nindex
+    integer  lchnk,ncol,indw, ixcldice,ixcldliq
+    real(r8) pi
+
+    real(r8) :: sfac(1:nswbands)  ! time varying scaling factors due to Solar Spectral Irrad at 1 A.U. per band
+    real(r8) :: solar_band_irrad(1:nswbands) ! rrtmg-assumed solar irradiance in each sw band
+    real(r8) :: delta    ! Solar declination angle  in radians
+    real(r8) :: dt_avg = 0.0_r8   ! time step to use for the shr_orb_cosz calculation, if use_rad_dt_cosz set to true
+    real(r8) :: eccf     ! Earth orbit eccentricity factor
+    real(r8) :: calday       ! current calendar day
+    real(r8) :: clat(pcols)  ! current latitudes(radians)
+    real(r8) :: clon(pcols)  ! current longitudes(radians)
+    real(r8), dimension(pcols,begchunk:endchunk) :: coszrs  ! Cosine solar zenith angle
+    ! real(r8), dimension(pcols,begchunk:endchunk) :: solin   ! Insolation
+
+    integer :: n,i,j,k
+    type(torch_tensor_wrap) :: input_tensors
+    type(torch_tensor) :: out_tensor
+    real(real32) :: input_torch(144, 96, nn_inputlength, 1)
+    real(real32), pointer :: output_torch(:, :, :, :)
+    
+    ! Data arrays for output netcdf file
+    integer :: varid_input, varid_output
+    integer :: dimids_input(4), dimids_output(4)
+    integer :: retval
+    real, dimension(1, nn_inputlength, Force_nlat, Force_nlon) :: data_input
+    real, dimension(1, nn_outputlength, Force_nlat, Force_nlon) :: data_output
+    character(len=100) :: nc_filename
+    ! character(:), allocatable :: filename
+    ! character(len=50) :: outputfile
+    ! integer :: arglen, stat
+    integer :: unit
+    real(r8) :: tot_irrad
+
+    pi = 3.14159265358979323846_r8
+    call cnst_get_ind('Q',indw)
+    call cnst_get_ind('CLDICE', ixcldice)
+    call cnst_get_ind('CLDLIQ', ixcldliq)
+
+    nlon = Force_nlon
+    nlat = Force_nlat
+    plev = pver
+
+    ! Zeyuan Hu 12/23/2024: gather global state variables
+    !---------------------------------------------------
+    do lchnk=begchunk,endchunk
+      ncol=phys_state(lchnk)%ncol
+      Model_state_U(:ncol,:pver,lchnk)=phys_state(lchnk)%u(:ncol,:pver)
+      Model_state_V(:ncol,:pver,lchnk)=phys_state(lchnk)%v(:ncol,:pver)
+      Model_state_T(:ncol,:pver,lchnk)=phys_state(lchnk)%t(:ncol,:pver)
+      Model_state_Q(:ncol,:pver,lchnk)=phys_state(lchnk)%q(:ncol,:pver,indw)
+      Model_state_QLIQ(:ncol,:pver,lchnk)=phys_state(lchnk)%q(:ncol,:pver,ixcldliq)
+      Model_state_QICE(:ncol,:pver,lchnk)=phys_state(lchnk)%q(:ncol,:pver,ixcldice)
+      Model_state_OMEGA(:ncol,:pver,lchnk)=phys_state(lchnk)%omega(:ncol,:pver)
+      Model_state_PS(:ncol,lchnk)=phys_state(lchnk)%ps(:ncol)
+      ! Model_state_SOLIN(:ncol,lchnk)=0.0 ! Zeyuan Hu 12/23/2024: set to 0 for now
+      Model_state_LHFLX(:ncol,lchnk)=cam_in(lchnk)%lhf(:ncol)
+      Model_state_SHFLX(:ncol,lchnk)=cam_in(lchnk)%shf(:ncol)
+      Model_state_SNOWHLND(:ncol,lchnk)=cam_in(lchnk)%snowhland(:ncol)
+      Model_state_PHIS(:ncol,lchnk)=phys_state(lchnk)%phis(:ncol)
+      Model_state_TAUX(:ncol,lchnk)=cam_in(lchnk)%wsx(:ncol)
+      Model_state_TAUY(:ncol,lchnk)=cam_in(lchnk)%wsy(:ncol)
+      Model_state_TS(:ncol,lchnk)=cam_in(lchnk)%ts(:ncol)
+      Model_state_ICEFRAC(:ncol,lchnk)=cam_in(lchnk)%icefrac(:ncol)
+      Model_state_LANDFRAC(:ncol,lchnk)=cam_in(lchnk)%landfrac(:ncol)
+      Model_state_lat(:ncol,lchnk)=phys_state(lchnk)%lat(:ncol)*(180./pi)
+      Model_state_lon(:ncol,lchnk)=phys_state(lchnk)%lon(:ncol)*(180./pi)
+      Model_state_tod(:ncol,lchnk)=nnCorrector_Curr_Sec/3600. ! in hours
+      Model_state_toy(:ncol,lchnk)=nnCorrector_Curr_Day ! in day
+    end do
+
+    ! call get_ref_solar_band_irrad( solar_band_irrad ) ! this can move to init subroutine
+    tot_irrad = sol_tsi
+    call get_variability(sfac)                        ! "
+    do lchnk=begchunk,endchunk
+      ncol = phys_state(lchnk)%ncol
+      calday = get_curr_calday() ! get current calendar day; no time offset as was in E3SM, need to double check!
+      ! coszrs
+      call get_rlat_all_p(lchnk, ncol, clat)
+      call get_rlon_all_p(lchnk, ncol, clon)
+      call shr_orb_decl(calday  ,eccen     ,mvelpp  ,lambm0  ,obliqr  , &
+                        delta   ,eccf      )
+      ! call zenith(calday, clat, clon, coszrs(:,lchnk), ncol, dt_avg)
+      ! do i = 1, ncol
+      !   ! coszrs(i,lchnk) = shr_orb_cosz(calday, clat(i), clon(i), delta, dt_avg)
+      ! end do
+      call zenith (calday, clat, clon, coszrs(:,lchnk), ncol, dt_avg)
+      ! solin(:,lchnk) = sum(sfac(:)*solar_band_irrad(:)) * eccf * coszrs(:,lchnk)
+      ! Model_state_SOLIN(:ncol,lchnk) = sum(sfac(:)*solar_band_irrad(:)) * eccf * coszrs(:,lchnk)
+      ! Model_state_SOLIN(:ncol,lchnk) = tot_irrad*eccf*coszrs(:,lchnk)
+      do i=1,ncol
+        Model_state_SOLIN(i,lchnk) = max(tot_irrad*eccf*coszrs(i,lchnk),0.0_r8)
+      end do
+    end do
+
+    call gather_chunk_to_field(1,Force_nlev,1,Force_nlon,Model_state_U,Xtrans)
+    if (masterproc) then
+      do ilat=1,nlat
+      do ilev=1,plev
+      do ilon=1,nlon
+        Uanal(ilon,ilat,ilev)=Xtrans(ilon,ilev,ilat)
+      end do
+      end do
+      end do
+    endif ! (masterproc) then
+
+    call gather_chunk_to_field(1,Force_nlev,1,Force_nlon,Model_state_V,Xtrans)
+    if (masterproc) then
+      do ilat=1,nlat
+      do ilev=1,plev
+      do ilon=1,nlon
+        Vanal(ilon,ilat,ilev)=Xtrans(ilon,ilev,ilat)
+      end do
+      end do
+      end do
+    endif ! (masterproc) then
+
+    call gather_chunk_to_field(1,Force_nlev,1,Force_nlon,Model_state_T,Xtrans)
+    if (masterproc) then
+      do ilat=1,nlat
+      do ilev=1,plev
+      do ilon=1,nlon
+        Tanal(ilon,ilat,ilev)=Xtrans(ilon,ilev,ilat)
+      end do
+      end do
+      end do
+    endif ! (masterproc) then
+
+    call gather_chunk_to_field(1,Force_nlev,1,Force_nlon,Model_state_Q,Xtrans)
+    if (masterproc) then
+      do ilat=1,nlat
+      do ilev=1,plev
+      do ilon=1,nlon
+        Qanal(ilon,ilat,ilev)=Xtrans(ilon,ilev,ilat)
+      end do
+      end do
+      end do
+    endif ! (masterproc) then
+
+    call gather_chunk_to_field(1,Force_nlev,1,Force_nlon,Model_state_QLIQ,Xtrans)
+    if (masterproc) then
+      do ilat=1,nlat
+      do ilev=1,plev
+      do ilon=1,nlon
+        QLIQanal(ilon,ilat,ilev)=Xtrans(ilon,ilev,ilat)
+      end do
+      end do
+      end do
+    endif ! (masterproc) then
+
+    call gather_chunk_to_field(1,Force_nlev,1,Force_nlon,Model_state_QICE,Xtrans)
+    if (masterproc) then
+      do ilat=1,nlat
+      do ilev=1,plev
+      do ilon=1,nlon
+        QICEanal(ilon,ilat,ilev)=Xtrans(ilon,ilev,ilat)
+      end do
+      end do
+      end do
+    endif ! (masterproc) then
+
+    call gather_chunk_to_field(1,Force_nlev,1,Force_nlon,Model_state_OMEGA,Xtrans)
+    if (masterproc) then
+      do ilat=1,nlat
+      do ilev=1,plev
+      do ilon=1,nlon
+        OMEGAanal(ilon,ilat,ilev)=Xtrans(ilon,ilev,ilat)
+      end do
+      end do
+      end do
+    endif ! (masterproc) then
+
+    call gather_chunk_to_field(1,1,1,Force_nlon,Model_state_PS,Xtransf)
+    if (masterproc) then
+      do ilat=1,nlat
+      do ilon=1,nlon
+        PSanal(ilon,ilat)=Xtransf(1,ilon,ilat)
+      end do
+      end do
+    endif ! (masterproc) then
+    
+    call gather_chunk_to_field(1,1,1,Force_nlon,Model_state_SOLIN,Xtransf)
+    if (masterproc) then
+      do ilat=1,nlat
+      do ilon=1,nlon
+        SOLINanal(ilon,ilat)=Xtransf(1,ilon,ilat)
+      end do
+      end do
+    endif ! (masterproc) then
+
+    call gather_chunk_to_field(1,1,1,Force_nlon,Model_state_LHFLX,Xtransf)
+    if (masterproc) then
+      do ilat=1,nlat
+      do ilon=1,nlon
+        LHFLXanal(ilon,ilat)=Xtransf(1,ilon,ilat)
+      end do
+      end do
+    endif ! (masterproc) then
+
+    call gather_chunk_to_field(1,1,1,Force_nlon,Model_state_SHFLX,Xtransf)
+    if (masterproc) then
+      do ilat=1,nlat
+      do ilon=1,nlon
+        SHFLXanal(ilon,ilat)=Xtransf(1,ilon,ilat)
+      end do
+      end do
+    endif ! (masterproc) then
+
+    call gather_chunk_to_field(1,1,1,Force_nlon,Model_state_SNOWHLND,Xtransf)
+    if (masterproc) then
+      do ilat=1,nlat
+      do ilon=1,nlon
+        SNOWHLNDanal(ilon,ilat)=Xtransf(1,ilon,ilat)
+      end do
+      end do
+    endif ! (masterproc) then
+
+    call gather_chunk_to_field(1,1,1,Force_nlon,Model_state_PHIS,Xtransf)
+    if (masterproc) then
+      do ilat=1,nlat
+      do ilon=1,nlon
+        PHISanal(ilon,ilat)=Xtransf(1,ilon,ilat)
+      end do
+      end do
+    endif ! (masterproc) then
+
+    call gather_chunk_to_field(1,1,1,Force_nlon,Model_state_TAUX,Xtransf)
+    if (masterproc) then
+      do ilat=1,nlat
+      do ilon=1,nlon
+        TAUXanal(ilon,ilat)=Xtransf(1,ilon,ilat)
+      end do
+      end do
+    endif ! (masterproc) then
+
+    call gather_chunk_to_field(1,1,1,Force_nlon,Model_state_TAUY,Xtransf)
+    if (masterproc) then
+      do ilat=1,nlat
+      do ilon=1,nlon
+        TAUYanal(ilon,ilat)=Xtransf(1,ilon,ilat)
+      end do
+      end do
+    endif ! (masterproc) then
+
+    call gather_chunk_to_field(1,1,1,Force_nlon,Model_state_TS,Xtransf)
+    if (masterproc) then
+      do ilat=1,nlat
+      do ilon=1,nlon
+        TSanal(ilon,ilat)=Xtransf(1,ilon,ilat)
+      end do
+      end do
+    endif ! (masterproc) then
+    
+    call gather_chunk_to_field(1,1,1,Force_nlon,Model_state_ICEFRAC,Xtransf)
+    if (masterproc) then
+      do ilat=1,nlat
+      do ilon=1,nlon
+        ICEFRACanal(ilon,ilat)=Xtransf(1,ilon,ilat)
+      end do
+      end do
+    endif ! (masterproc) then
+
+    call gather_chunk_to_field(1,1,1,Force_nlon,Model_state_LANDFRAC,Xtransf)
+    if (masterproc) then
+      do ilat=1,nlat
+      do ilon=1,nlon
+        LANDFRACanal(ilon,ilat)=Xtransf(1,ilon,ilat)
+      end do
+      end do
+    endif ! (masterproc) then
+
+    tod_anal(:,:) = nnCorrector_Curr_Sec/3600. ! in hours
+    toy_anal(:,:) = nnCorrector_Curr_Day ! in day
+
+    call gather_chunk_to_field(1,1,1,Force_nlon,Model_state_lat,Xtransf)
+    if (masterproc) then
+      do ilat=1,nlat
+      do ilon=1,nlon
+        clat_anal(ilon,ilat)=Xtransf(1,ilon,ilat)
+      end do
+      end do
+    endif ! (masterproc) then
+
+    call gather_chunk_to_field(1,1,1,Force_nlon,Model_state_lon,Xtransf)
+    if (masterproc) then
+      do ilat=1,nlat
+      do ilon=1,nlon
+        clon_anal(ilon,ilat)=Xtransf(1,ilon,ilat)
+      end do
+      end do
+    endif ! (masterproc) then
+
+    ! collect and prepare the input data for the neural network
+    if (masterproc) then   
+      do ilon=1,nlon
+        do ilat=1,nlat
+
+          input_torch(ilon,ilat,0*plev+1:1*plev,1) = Tanal(ilon,ilat,1:plev)
+          input_torch(ilon,ilat,1*plev+1:2*plev,1) = Qanal(ilon,ilat,1:plev)
+          input_torch(ilon,ilat,2*plev+1:3*plev,1) = Uanal(ilon,ilat,1:plev)
+          input_torch(ilon,ilat,3*plev+1:4*plev,1) = Vanal(ilon,ilat,1:plev)
+          input_torch(ilon,ilat,4*plev+1:5*plev,1) = QLIQanal(ilon,ilat,1:plev)
+          input_torch(ilon,ilat,5*plev+1:6*plev,1) = QICEanal(ilon,ilat,1:plev)
+          input_torch(ilon,ilat,6*plev+1:7*plev,1) = OMEGAanal(ilon,ilat,1:plev)
+          input_torch(ilon,ilat,7*plev+1,1) = PSanal(ilon,ilat)
+          input_torch(ilon,ilat,7*plev+2,1) = SOLINanal(ilon,ilat)
+          input_torch(ilon,ilat,7*plev+3,1) = LHFLXanal(ilon,ilat)
+          input_torch(ilon,ilat,7*plev+4,1) = SHFLXanal(ilon,ilat)
+          input_torch(ilon,ilat,7*plev+5,1) = SNOWHLNDanal(ilon,ilat)
+          input_torch(ilon,ilat,7*plev+6,1) = PHISanal(ilon,ilat)
+          input_torch(ilon,ilat,7*plev+7,1) = TAUXanal(ilon,ilat)
+          input_torch(ilon,ilat,7*plev+8,1) = TAUYanal(ilon,ilat)
+          input_torch(ilon,ilat,7*plev+9,1) = TSanal(ilon,ilat)
+          input_torch(ilon,ilat,7*plev+10,1) = ICEFRACanal(ilon,ilat)
+          input_torch(ilon,ilat,7*plev+11,1) = LANDFRACanal(ilon,ilat)
+          input_torch(ilon,ilat,7*plev+12,1) = clat_anal(ilon,ilat)
+          input_torch(ilon,ilat,7*plev+13,1) = clon_anal(ilon,ilat)
+          input_torch(ilon,ilat,7*plev+14,1) = tod_anal(ilon,ilat)
+          input_torch(ilon,ilat,7*plev+15,1) = toy_anal(ilon,ilat)
+
+        end do
+      end do
+    else
+      input_torch(:,:,:,:) = 0.0_r8
+    endif ! (masterproc) then
+
+    ! run the NN inference
+    call input_tensors%create
+    call input_tensors%add_array(input_torch)
+    call torch_mod(1)%forward(input_tensors, out_tensor, flags=module_use_inference_mode)
+    call out_tensor%to_array(output_torch)
+
+    ! mapping nn output to the forcing arrays 
+    if (masterproc) then 
+      do ilat=1,nlat
+      do ilev=1,plev
+      do ilon=1,nlon
+        Xtrans(ilon,ilev,ilat)=output_torch(ilon,ilat,ilev,1)
+      end do
+      end do
+      end do
+    endif ! (masterproc) then
+    call scatter_field_to_chunk(1,Force_nlev,1,Force_nlon,Xtrans,   &
+                                nnTarget_S(1,1,begchunk))
+
+    if (masterproc) then 
+      do ilat=1,nlat
+      do ilev=1,plev
+      do ilon=1,nlon
+        Xtrans(ilon,ilev,ilat)=output_torch(ilon,ilat,1*plev+ilev,1)
+      end do
+      end do
+      end do
+    endif ! (masterproc) then
+    call scatter_field_to_chunk(1,Force_nlev,1,Force_nlon,Xtrans,   &
+                                nnTarget_Q(1,1,begchunk))
+
+    if (masterproc) then 
+      do ilat=1,nlat
+      do ilev=1,plev
+      do ilon=1,nlon
+        Xtrans(ilon,ilev,ilat)=output_torch(ilon,ilat,2*plev+ilev,1)
+      end do
+      end do
+      end do
+    endif ! (masterproc) then
+    call scatter_field_to_chunk(1,Force_nlev,1,Force_nlon,Xtrans,   &
+                                nnTarget_U(1,1,begchunk))
+
+    if (masterproc) then 
+      do ilat=1,nlat
+      do ilev=1,plev
+      do ilon=1,nlon
+        Xtrans(ilon,ilev,ilat)=output_torch(ilon,ilat,3*plev+ilev,1)
+      end do
+      end do
+      end do
+    endif ! (masterproc) then
+    call scatter_field_to_chunk(1,Force_nlev,1,Force_nlon,Xtrans,   &
+                                nnTarget_V(1,1,begchunk))
+
+    ! saving NN input and output arrays to a netcdf file if NN_Data_Save is true
+    if (NN_Data_Save) then
+      if (masterproc) then  
+        ! output the data of input/output to a netcdf file
+        do i=1,nn_inputlength
+        do ilat=1,nlat
+        do ilon=1,nlon
+          data_input(1,i,ilat,ilon) = input_torch(ilon,ilat,i,1)
+        end do
+        end do
+        end do
+
+        do i=1,nn_outputlength
+        do ilat=1,nlat
+        do ilon=1,nlon
+          data_output(1,i,ilat,ilon) = output_torch(ilon,ilat,i,1)
+        end do
+        end do
+        end do
+
+        ! Create filename with time information
+        write(nc_filename, '(A,I4.4,A,I2.2,A,I2.2,A,I5.5,A)') &
+              "nn_verification_", nnCorrector_Curr_Year, "-", &
+              nnCorrector_Curr_Month, "-", nnCorrector_Curr_Day, "-", &
+              nnCorrector_Curr_Sec, ".nc"
+
+        print *, "Filename: ", trim(nc_filename)
+
+        ! Create NetCDF file
+        istat = nf90_create(trim(nc_filename), nf90_clobber, ncid)
+        if (istat /= nf90_noerr) then
+          write(*, *) 'NF90_CREATE: failed for file ', trim(nc_filename)
+          write(*, *) nf90_strerror(istat)
+          call endrun('CREATE_NETCDF')
+        endif
+
+        ! Define dimensions
+        istat = nf90_def_dim(ncid, "time", 1, dimids_input(1))
+        istat = nf90_def_dim(ncid, "input_length", nn_inputlength, dimids_input(2))
+        istat = nf90_def_dim(ncid, "lat", nlat, dimids_input(3))
+        istat = nf90_def_dim(ncid, "lon", nlon, dimids_input(4))
+        if (istat /= nf90_noerr) then
+          write(*, *) 'NF90_DEF_DIM: failed'
+          write(*, *) nf90_strerror(istat)
+          call endrun('DEFINE_DIMENSIONS')
+        endif
+
+        dimids_output = dimids_input
+        istat = nf90_def_dim(ncid, "output_length", nn_outputlength, dimids_output(2))
+        if (istat /= nf90_noerr) then
+          write(*, *) 'NF90_DEF_DIM (output_length): failed'
+          write(*, *) nf90_strerror(istat)
+          call endrun('DEFINE_OUTPUT_DIMENSIONS')
+        endif
+          
+        ! Define variables for input and output data
+        istat = nf90_def_var(ncid, "data_input", nf90_real, dimids_input, varid_input)
+        if (istat /= nf90_noerr) then
+          write(*, *) 'NF90_DEF_VAR (data_input): failed'
+          write(*, *) nf90_strerror(istat)
+          call endrun('DEFINE_VAR_INPUT')
+        endif
+
+        istat = nf90_def_var(ncid, "data_output", nf90_real, dimids_output, varid_output)
+        if (istat /= nf90_noerr) then
+          write(*, *) 'NF90_DEF_VAR (data_output): failed'
+          write(*, *) nf90_strerror(istat)
+          call endrun('DEFINE_VAR_OUTPUT')
+        endif
+
+        ! End define mode
+        istat = nf90_enddef(ncid)
+        if (istat /= nf90_noerr) then
+          write(*, *) 'NF90_ENDDEF: failed'
+          write(*, *) nf90_strerror(istat)
+          call endrun('ENDDEF')
+        endif
+
+        ! Write data
+        istat = nf90_put_var(ncid, varid_input, data_input)
+        if (istat /= nf90_noerr) then
+          write(*, *) 'NF90_PUT_VAR (data_input): failed'
+          write(*, *) nf90_strerror(istat)
+          call endrun('PUT_VAR_INPUT')
+        endif
+
+        istat = nf90_put_var(ncid, varid_output, data_output)
+        if (istat /= nf90_noerr) then
+          write(*, *) 'NF90_PUT_VAR (data_output): failed'
+          write(*, *) nf90_strerror(istat)
+          call endrun('PUT_VAR_OUTPUT')
+        endif
+
+        ! Close file
+        istat = nf90_close(ncid)
+        if (istat /= nf90_noerr) then
+          write(*, *) 'NF90_CLOSE: failed'
+          write(*, *) nf90_strerror(istat)
+          call endrun('CLOSE_NETCDF')
+        endif
+
+        print *, "Successfully written input and output arrays to ", trim(nc_filename)
+
+      endif ! (masterproc) then
+    endif ! (NN_Data_Save) then
+    ! End Routine
+    !------------
+    return
+
   end subroutine ! nncorrector_update
 
   !================================================================
