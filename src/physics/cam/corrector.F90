@@ -159,13 +159,15 @@ module corrector
   !------------------
   use shr_kind_mod,   only:r8=>SHR_KIND_R8,cs=>SHR_KIND_CS,cl=>SHR_KIND_CL
   use time_manager,   only:timemgr_time_ge,timemgr_time_inc,get_curr_date,get_step_size
-  use phys_grid   ,   only:scatter_field_to_chunk
+  use phys_grid   ,   only:scatter_field_to_chunk,gather_chunk_to_field 
   use cam_abortutils, only:endrun
   use spmd_utils  ,   only:masterproc
   use cam_logfile ,   only:iulog
 #ifdef SPMD
   use mpishorthand
 #endif
+  use torch_ftn
+  use iso_fortran_env
 
   ! Set all Global values and routines to private by default 
   ! and then explicitly set their exposure.
@@ -174,10 +176,14 @@ module corrector
   private
 
   public:: Force_Model,Force_ON
+  public:: nnCorrector_Model,nnCorrector_ON
   public:: corrector_readnl
   public:: corrector_init
   public:: corrector_timestep_init
+  public:: nncorrector_timestep_init
   public:: corrector_timestep_tend
+  public:: nncorrector_timestep_tend
+  public:: init_neural_net
   private::corrector_update_analyses_fv
   private::corrector_set_PSprofile
   private::corrector_set_profile
@@ -226,6 +232,16 @@ module corrector
   real(r8)         :: Force_Hwin_max
   real(r8)         :: Force_Hwin_min
 
+  ! nncorrector Parameters
+  logical          :: nnCorrector_Model       =.false.
+  logical          :: nnCorrector_ON          =.false.
+  logical          :: nnCorrector_Initialized =.false.
+  character(len=cl):: Force_torch_model 
+  logical          :: NN_Data_Save = .false.
+  integer          :: nn_inputlength  = 197     ! length of NN input vector
+  integer          :: nn_outputlength = 104     ! length of NN output vector
+  type(torch_module), allocatable :: torch_mod(:)
+
   ! corrector State Arrays
   !-----------------------
   integer Force_nlon,Force_nlat,Force_ncol,Force_nlev
@@ -244,6 +260,46 @@ module corrector
   real(r8),allocatable:: Force_Sstep (:,:,:)  !(pcols,pver,begchunk:endchunk)
   real(r8),allocatable:: Force_Qstep (:,:,:)  !(pcols,pver,begchunk:endchunk)
   real(r8),allocatable:: Force_PSstep(:,:)    !(pcols,begchunk:endchunk)
+
+  ! nncorrector state arrays
+  real(r8),allocatable::Model_state_U     (:,:,:)  !(pcols,pver,begchunk:endchunk)
+  real(r8),allocatable::Model_state_V     (:,:,:)  !(pcols,pver,begchunk:endchunk)
+  real(r8),allocatable::Model_state_T     (:,:,:)  !(pcols,pver,begchunk:endchunk)
+  real(r8),allocatable::Model_state_Q     (:,:,:)  !(pcols,pver,begchunk:endchunk)
+  real(r8),allocatable::Model_state_QLIQ     (:,:,:)  !(pcols,pver,begchunk:endchunk)
+  real(r8),allocatable::Model_state_QICE     (:,:,:)  !(pcols,pver,begchunk:endchunk)
+  real(r8),allocatable::Model_state_OMEGA     (:,:,:)  !(pcols,pver,begchunk:endchunk)
+  real(r8),allocatable::Model_state_PS    (:,:)    !(pcols,begchunk:endchunk)
+  real(r8),allocatable::Model_state_SOLIN    (:,:)    !(pcols,begchunk:endchunk)
+  real(r8),allocatable::Model_state_LHFLX    (:,:)    !(pcols,begchunk:endchunk)
+  real(r8),allocatable::Model_state_SHFLX    (:,:)    !(pcols,begchunk:endchunk)
+  real(r8),allocatable::Model_state_SNOWHLND    (:,:)    !(pcols,begchunk:endchunk)
+  real(r8),allocatable::Model_state_PHIS    (:,:)    !(pcols,begchunk:endchunk)
+  real(r8),allocatable::Model_state_TAUX    (:,:)    !(pcols,begchunk:endchunk)
+  real(r8),allocatable::Model_state_TAUY    (:,:)    !(pcols,begchunk:endchunk)
+  real(r8),allocatable::Model_state_TS    (:,:)    !(pcols,begchunk:endchunk)
+  real(r8),allocatable::Model_state_ICEFRAC    (:,:)    !(pcols,begchunk:endchunk)
+  real(r8),allocatable::Model_state_LANDFRAC    (:,:)    !(pcols,begchunk:endchunk)
+  real(r8),allocatable::Model_state_lat    (:,:)    !(pcols,begchunk:endchunk)
+  real(r8),allocatable::Model_state_lon    (:,:)    !(pcols,begchunk:endchunk)
+  real(r8),allocatable::Model_state_tod    (:,:)    !(pcols,begchunk:endchunk)
+  real(r8),allocatable::Model_state_toy    (:,:)    !(pcols,begchunk:endchunk)
+
+  ! nncorrector tendency arrays
+  real(r8),allocatable::nnTarget_U  (:,:,:)  !(pcols,pver,begchunk:endchunk)
+  real(r8),allocatable::nnTarget_V  (:,:,:)  !(pcols,pver,begchunk:endchunk)
+  real(r8),allocatable::nnTarget_S  (:,:,:)  !(pcols,pver,begchunk:endchunk)
+  real(r8),allocatable::nnTarget_Q  (:,:,:)  !(pcols,pver,begchunk:endchunk)
+  real(r8),allocatable::nnCorrector_Ustep (:,:,:)  !(pcols,pver,begchunk:endchunk)
+  real(r8),allocatable::nnCorrector_Vstep (:,:,:)  !(pcols,pver,begchunk:endchunk)
+  real(r8),allocatable::nnCorrector_Sstep (:,:,:)  !(pcols,pver,begchunk:endchunk)
+  real(r8),allocatable::nnCorrector_Qstep (:,:,:)  !(pcols,pver,begchunk:endchunk)
+
+  ! nncorrector time markers
+  integer          :: nnCorrector_Curr_Year,nnCorrector_Curr_Month
+  integer          :: nnCorrector_Curr_Day ,nnCorrector_Curr_Sec
+  integer          :: nnCorrector_Next_Year,nnCorrector_Next_Month
+  integer          :: nnCorrector_Next_Day ,nnCorrector_Next_Sec
 
   ! corrector Observation Arrays
   !-----------------------------
@@ -285,7 +341,9 @@ contains
                          Force_Hwin_Invert,                            &
                          Force_Vwin_Lindex,Force_Vwin_Hindex,          &
                          Force_Vwin_Ldelta,Force_Vwin_Hdelta,          &
-                         Force_Vwin_Invert                            
+                         Force_Vwin_Invert,                            &
+                         nnCorrector_Model, nnCorrector_ON,            &
+                         Force_torch_model, NN_Data_Save
 
    ! corrector is NOT initialized yet, For now
    ! corrector will always begin/end at midnight.
@@ -333,6 +391,17 @@ contains
    Force_Vwin_Invert   = .false.
    Force_Vwin_lo       = 0.0_r8
    Force_Vwin_hi       = 1.0_r8
+
+   ! nnCorrector is also NOT initialized yet, For now
+   !--------------------------------------------
+   nnCorrector_Initialized =.false.
+   nnCorrector_ON          =.false.
+
+   ! Set Default Namelist values
+   !-----------------------------
+   nnCorrector_Model = .false.
+   Force_torch_model = '/n/holylfs06/LABS/kuang_lab/Lab/kuanglfs/zeyuanhu/climcorr/swin_test_dim1024_depth8_v2_2nodes_r4.pt'
+   NN_Data_Save = .false.
 
    ! Read in namelist values
    !------------------------
@@ -454,6 +523,13 @@ contains
    call mpibcast(Force_Vwin_Lindex  , 1, mpir8 , 0, mpicom)
    call mpibcast(Force_Vwin_Ldelta  , 1, mpir8 , 0, mpicom)
    call mpibcast(Force_Vwin_Invert,   1, mpilog, 0, mpicom)
+
+   call mpibcast(nnCorrector_Model  , 1, mpilog, 0, mpicom)
+   call mpibcast(nnCorrector_ON     , 1, mpilog, 0, mpicom)
+   call mpibcast(nnCorrector_Initialized, 1, mpilog, 0, mpicom) 
+   call mpibcast(Force_torch_model  , len(Force_torch_model), mpichar, 0, mpicom)
+   call mpibcast(NN_Data_Save       , 1, mpilog, 0, mpicom)
+
 #endif
 
    ! End Routine
@@ -535,12 +611,81 @@ contains
    allocate(Force_PSstep(pcols,begchunk:endchunk),stat=istat)
    call alloc_err(istat,'corrector_init','Force_PSstep',pcols*((endchunk-begchunk)+1))
 
+   ! Allocate Space for nncorrector state arrays
+   !-----------------------------------------
+   allocate(Model_state_U(pcols,pver,begchunk:endchunk),stat=istat)
+   call alloc_err(istat,'corrector_init','Model_state_U',pcols*pver*((endchunk-begchunk)+1))
+   allocate(Model_state_V(pcols,pver,begchunk:endchunk),stat=istat)
+   call alloc_err(istat,'corrector_init','Model_state_V',pcols*pver*((endchunk-begchunk)+1))
+   allocate(Model_state_T(pcols,pver,begchunk:endchunk),stat=istat)
+   call alloc_err(istat,'corrector_init','Model_state_T',pcols*pver*((endchunk-begchunk)+1))
+   allocate(Model_state_Q(pcols,pver,begchunk:endchunk),stat=istat)
+   call alloc_err(istat,'corrector_init','Model_state_Q',pcols*pver*((endchunk-begchunk)+1))
+   allocate(Model_state_QLIQ(pcols,pver,begchunk:endchunk),stat=istat)
+   call alloc_err(istat,'corrector_init','Model_state_QLIQ',pcols*pver*((endchunk-begchunk)+1))
+   allocate(Model_state_QICE(pcols,pver,begchunk:endchunk),stat=istat)
+   call alloc_err(istat,'corrector_init','Model_state_QICE',pcols*pver*((endchunk-begchunk)+1))
+   allocate(Model_state_OMEGA(pcols,pver,begchunk:endchunk),stat=istat)
+   call alloc_err(istat,'corrector_init','Model_state_OMEGA',pcols*pver*((endchunk-begchunk)+1))
+   allocate(Model_state_PS(pcols,begchunk:endchunk),stat=istat)
+   call alloc_err(istat,'corrector_init','Model_state_PS',pcols*((endchunk-begchunk)+1))
+   allocate(Model_state_SOLIN(pcols,begchunk:endchunk),stat=istat)
+   call alloc_err(istat,'corrector_init','Model_state_SOLIN',pcols*((endchunk-begchunk)+1))
+   allocate(Model_state_LHFLX(pcols,begchunk:endchunk),stat=istat)
+   call alloc_err(istat,'corrector_init','Model_state_LHFLX',pcols*((endchunk-begchunk)+1))
+   allocate(Model_state_SHFLX(pcols,begchunk:endchunk),stat=istat)
+   call alloc_err(istat,'corrector_init','Model_state_SHFLX',pcols*((endchunk-begchunk)+1))
+   allocate(Model_state_SNOWHLND(pcols,begchunk:endchunk),stat=istat)
+   call alloc_err(istat,'corrector_init','Model_state_SNOWHLND',pcols*((endchunk-begchunk)+1))
+   allocate(Model_state_PHIS(pcols,begchunk:endchunk),stat=istat)
+   call alloc_err(istat,'corrector_init','Model_state_PHIS',pcols*((endchunk-begchunk)+1))
+   allocate(Model_state_TAUX(pcols,begchunk:endchunk),stat=istat)
+   call alloc_err(istat,'corrector_init','Model_state_TAUX',pcols*((endchunk-begchunk)+1))
+   allocate(Model_state_TAUY(pcols,begchunk:endchunk),stat=istat)
+   call alloc_err(istat,'corrector_init','Model_state_TAUY',pcols*((endchunk-begchunk)+1))
+   allocate(Model_state_TS(pcols,begchunk:endchunk),stat=istat)
+   call alloc_err(istat,'corrector_init','Model_state_TS',pcols*((endchunk-begchunk)+1))
+   allocate(Model_state_ICEFRAC(pcols,begchunk:endchunk),stat=istat)
+   call alloc_err(istat,'corrector_init','Model_state_ICEFRAC',pcols*((endchunk-begchunk)+1))
+   allocate(Model_state_LANDFRAC(pcols,begchunk:endchunk),stat=istat)
+   call alloc_err(istat,'corrector_init','Model_state_LANDFRAC',pcols*((endchunk-begchunk)+1))
+   allocate(Model_state_lat(pcols,begchunk:endchunk),stat=istat)
+   call alloc_err(istat,'corrector_init','Model_state_lat',pcols*((endchunk-begchunk)+1))
+   allocate(Model_state_lon(pcols,begchunk:endchunk),stat=istat)
+   call alloc_err(istat,'corrector_init','Model_state_lon',pcols*((endchunk-begchunk)+1))
+   allocate(Model_state_tod(pcols,begchunk:endchunk),stat=istat)
+   call alloc_err(istat,'corrector_init','Model_state_tod',pcols*((endchunk-begchunk)+1))
+   allocate(Model_state_toy(pcols,begchunk:endchunk),stat=istat)
+   call alloc_err(istat,'corrector_init','Model_state_toy',pcols*((endchunk-begchunk)+1))
+
+   allocate(nnTarget_U(pcols,pver,begchunk:endchunk),stat=istat)
+   call alloc_err(istat,'corrector_init','nnTarget_U',pcols*pver*((endchunk-begchunk)+1))
+   allocate(nnTarget_V(pcols,pver,begchunk:endchunk),stat=istat)
+   call alloc_err(istat,'corrector_init','nnTarget_V',pcols*pver*((endchunk-begchunk)+1))
+   allocate(nnTarget_S(pcols,pver,begchunk:endchunk),stat=istat)
+   call alloc_err(istat,'corrector_init','nnTarget_S',pcols*pver*((endchunk-begchunk)+1))
+   allocate(nnTarget_Q(pcols,pver,begchunk:endchunk),stat=istat)
+   call alloc_err(istat,'corrector_init','nnTarget_Q',pcols*pver*((endchunk-begchunk)+1))
+   allocate(nnCorrector_Ustep(pcols,pver,begchunk:endchunk),stat=istat)
+   call alloc_err(istat,'corrector_init','nnCorrector_Ustep',pcols*pver*((endchunk-begchunk)+1))
+   allocate(nnCorrector_Vstep(pcols,pver,begchunk:endchunk),stat=istat)
+   call alloc_err(istat,'corrector_init','nnCorrector_Vstep',pcols*pver*((endchunk-begchunk)+1))
+   allocate(nnCorrector_Sstep(pcols,pver,begchunk:endchunk),stat=istat)
+   call alloc_err(istat,'corrector_init','nnCorrector_Sstep',pcols*pver*((endchunk-begchunk)+1))
+   allocate(nnCorrector_Qstep(pcols,pver,begchunk:endchunk),stat=istat)
+   call alloc_err(istat,'corrector_init','nnCorrector_Qstep',pcols*pver*((endchunk-begchunk)+1))
+
    ! Register output fields with the cam history module
    !-----------------------------------------------------
-   call addfld( 'Force_U',(/ 'lev' /),'I','m/s/s'  ,'U corrector Tendency')
-   call addfld( 'Force_V',(/ 'lev' /),'I','m/s/s'  ,'V corrector Tendency')
-   call addfld( 'Force_T',(/ 'lev' /),'I','K/s'    ,'T corrector Tendency')
-   call addfld( 'Force_Q',(/ 'lev' /),'I','kg/kg/s','Q corrector Tendency')
+   call addfld( 'Force_U',(/ 'lev' /),'I','m/s/s'  ,'U corrector Tendency (state independent)')
+   call addfld( 'Force_V',(/ 'lev' /),'I','m/s/s'  ,'V corrector Tendency (state independent)')
+   call addfld( 'Force_T',(/ 'lev' /),'I','K/s'    ,'T corrector Tendency (state independent)')
+   call addfld( 'Force_Q',(/ 'lev' /),'I','kg/kg/s','Q corrector Tendency (state independent)')
+
+   call addfld( 'nnCorr_U',(/ 'lev' /),'I','m/s/s'  ,'U corrector Tendency (state dependent)')
+   call addfld( 'nnCorr_V',(/ 'lev' /),'I','m/s/s'  ,'V corrector Tendency (state dependent)')
+   call addfld( 'nnCorr_T',(/ 'lev' /),'I','K/s'    ,'T corrector Tendency (state dependent)')
+   call addfld( 'nnCorr_Q',(/ 'lev' /),'I','kg/kg/s','Q corrector Tendency (state dependent)')
 
    ! Values initialized only by masterproc
    !-----------------------------------------
@@ -579,6 +724,10 @@ contains
        Force_Next_Month=Month
        Force_Next_Day  =Day
        Force_Next_Sec  =(Sec/Force_Step)*Force_Step
+       nnCorrector_Next_Year =Year
+       nnCorrector_Next_Month=Month
+       nnCorrector_Next_Day  =Day
+       nnCorrector_Next_Sec  =(Sec/Force_Step)*Force_Step
      elseif(.not.After_Beg) then
        ! Set Time indicies to corrector start,
        ! timestep_init will initialize the data arrays.
@@ -587,11 +736,17 @@ contains
        Force_Next_Month=Force_Beg_Month
        Force_Next_Day  =Force_Beg_Day
        Force_Next_Sec  =Force_Beg_Sec
+       nnCorrector_Next_Year =Force_Beg_Year
+       nnCorrector_Next_Month=Force_Beg_Month
+       nnCorrector_Next_Day  =Force_Beg_Day
+       nnCorrector_Next_Sec  =Force_Beg_Sec
      elseif(.not.Before_End) then
        ! corrector will never occur, so switch it off
        !--------------------------------------------
        Force_Model=.false.
        Force_ON   =.false.
+       nnCorrector_Model=.false.
+       nnCorrector_ON   =.false.
        write(iulog,*) ' '
        write(iulog,*) 'corrector: WARNING - corrector has been requested by it will'
        write(iulog,*) 'corrector:           never occur for the given time values'
@@ -635,6 +790,7 @@ contains
      ! Initialization is done, 
      !--------------------------
      Force_Initialized=.true.
+     nnCorrector_Initialized=.true.
 
      ! Check that this is a valid DYCORE model
      !------------------------------------------
@@ -691,6 +847,10 @@ contains
      write(iulog,*) 'corrector: Force_Hwin_min      =',Force_Hwin_min
      write(iulog,*) 'corrector: Force_Initialized   =',Force_Initialized
 
+     write(iulog,*) 'corrector: nnCorrector_Model  =',nnCorrector_Model
+     write(iulog,*) 'corrector: Force_torch_model   =',trim(Force_torch_model)
+     write(iulog,*) 'corrector: NN_Data_Save        =',NN_Data_Save
+
    endif ! (masterproc) then
 
    ! Broadcast other variables that have changed
@@ -712,6 +872,14 @@ contains
    call mpibcast(Force_Hwin_min      ,            1, mpir8 , 0, mpicom)
    call mpibcast(Force_Hwin_lonWidthH,            1, mpir8 , 0, mpicom)
    call mpibcast(Force_Hwin_latWidthH,            1, mpir8 , 0, mpicom)
+
+   call mpibcast(nnCorrector_Next_Year     ,            1, mpiint, 0, mpicom)
+   call mpibcast(nnCorrector_Next_Month    ,            1, mpiint, 0, mpicom)
+   call mpibcast(nnCorrector_Next_Day      ,            1, mpiint, 0, mpicom)
+   call mpibcast(nnCorrector_Next_Sec      ,            1, mpiint, 0, mpicom)
+   call mpibcast(nnCorrector_Model         ,            1, mpilog, 0, mpicom)
+   call mpibcast(nnCorrector_ON            ,            1, mpilog, 0, mpicom)
+   call mpibcast(nnCorrector_Initialized   ,            1, mpilog, 0, mpicom)
 #endif
 
 !!DIAG
@@ -724,19 +892,21 @@ contains
    endif
 !!DIAG
 
-   ! Initialize the analysis filename at the NEXT time for startup.
-   !---------------------------------------------------------------
-   Force_File=interpret_filename_spec(Force_File_Template      , &
-                                       yr_spec=Force_Next_Year , &
-                                      mon_spec=Force_Next_Month, &
-                                      day_spec=Force_Next_Day  , &
-                                      sec_spec=Force_Next_Sec    )
-
-   if(masterproc) then
-    write(iulog,*) 'corrector: Reading forcing:',trim(Force_Path)//trim(Force_File)
-   endif
-
-  call corrector_update_analyses_fv (trim(Force_Path)//trim(Force_File))
+   if (Force_Model) then
+     ! Initialize the analysis filename at the NEXT time for startup.
+     !---------------------------------------------------------------
+     Force_File=interpret_filename_spec(Force_File_Template      , &
+                                         yr_spec=Force_Next_Year , &
+                                         mon_spec=Force_Next_Month, &
+                                         day_spec=Force_Next_Day  , &
+                                         sec_spec=Force_Next_Sec    )
+ 
+     if(masterproc) then
+       write(iulog,*) 'corrector: Reading forcing:',trim(Force_Path)//trim(Force_File)
+     endif
+   
+     call corrector_update_analyses_fv (trim(Force_Path)//trim(Force_File))
+   end if
 
    ! Initialize corrector Coeffcient profiles in local arrays
    ! Load zeros into corrector arrays
@@ -779,6 +949,39 @@ contains
      Target_S(:pcols,:pver,lchnk)=0._r8
      Target_Q(:pcols,:pver,lchnk)=0._r8
      Target_PS(:pcols,lchnk)=0._r8
+
+     Model_state_U(:pcols,:pver,lchnk)=0._r8
+     Model_state_V(:pcols,:pver,lchnk)=0._r8
+     Model_state_T(:pcols,:pver,lchnk)=0._r8
+     Model_state_Q(:pcols,:pver,lchnk)=0._r8
+     Model_state_QLIQ(:pcols,:pver,lchnk)=0._r8
+     Model_state_QICE(:pcols,:pver,lchnk)=0._r8
+     Model_state_OMEGA(:pcols,:pver,lchnk)=0._r8
+     
+     Model_state_PS(:pcols,lchnk)=0._r8
+     Model_state_SOLIN(:pcols,lchnk)=0._r8
+     Model_state_LHFLX(:pcols,lchnk)=0._r8
+     Model_state_SHFLX(:pcols,lchnk)=0._r8
+     Model_state_SNOWHLND(:pcols,lchnk)=0._r8
+     Model_state_PHIS(:pcols,lchnk)=0._r8
+     Model_state_TAUX(:pcols,lchnk)=0._r8
+     Model_state_TAUY(:pcols,lchnk)=0._r8
+     Model_state_TS(:pcols,lchnk)=0._r8
+     Model_state_ICEFRAC(:pcols,lchnk)=0._r8
+     Model_state_LANDFRAC(:pcols,lchnk)=0._r8
+     Model_state_lat(:pcols,lchnk)=0._r8
+     Model_state_lon(:pcols,lchnk)=0._r8
+     Model_state_tod(:pcols,lchnk)=0._r8
+     Model_state_toy(:pcols,lchnk)=0._r8
+
+     nnTarget_U(:pcols,:pver,lchnk)=0._r8
+     nnTarget_V(:pcols,:pver,lchnk)=0._r8
+     nnTarget_S(:pcols,:pver,lchnk)=0._r8
+     nnTarget_Q(:pcols,:pver,lchnk)=0._r8
+     nnCorrector_Ustep(:pcols,:pver,lchnk)=0._r8
+     nnCorrector_Vstep(:pcols,:pver,lchnk)=0._r8
+     nnCorrector_Sstep(:pcols,:pver,lchnk)=0._r8
+     nnCorrector_Qstep(:pcols,:pver,lchnk)=0._r8
    end do
 
    ! End Routine
@@ -984,6 +1187,202 @@ contains
    !------------
    return
   end subroutine ! corrector_timestep_tend
+  !================================================================
+
+
+  !================================================================
+  subroutine nncorrector_timestep_init(phys_state, cam_in)
+    ! 
+    ! nncorrector_TIMESTEP_INIT: 
+    ! Zeyuan Hu 12/23/2024: 
+    !                 This subroutine is inherited from corrector_TIMESTEP_INIT
+    !                 subroutine to use the neural network to update bias correctors
+    !                 Check the current time and update corrector 
+    !                 arrays when necessary. Toggle the corrector flag
+    !                 when the time is withing the corrector window.
+    !===============================================================
+    use physconst    ,only: cpair
+    use physics_types,only: physics_state
+    use constituents ,only: cnst_get_ind
+    use dycore       ,only: dycore_is
+    use ppgrid       ,only: pver,pcols,begchunk,endchunk
+    use filenames    ,only: interpret_filename_spec
+    use ESMF
+    use camsrfexch     ,only: cam_in_t,cam_out_t
+
+    ! Arguments
+    !-----------
+    type(physics_state),intent(in):: phys_state(begchunk:endchunk)
+    type(cam_in_t),intent(in):: cam_in(begchunk:endchunk)
+ 
+    ! Local values
+    !----------------
+    integer Year,Month,Day,Sec
+    integer YMD1,YMD2,YMD
+    logical Update_Force,Sync_Error
+    logical After_Beg   ,Before_End
+    integer lchnk,ncol,indw
+ 
+    type(ESMF_Time)         Date1,Date2
+    type(ESMF_TimeInterval) DateDiff
+    integer                 DeltaT
+    real(r8)                Tscale
+    real(r8)                Tfrac
+    integer                 rc
+    integer                 nn
+    integer                 kk
+    real(r8)                Sbar,Qbar,Wsum
+    integer                 dtime
+
+    ! Check if corrector is initialized
+    !---------------------------------
+    if(.not.nnCorrector_Initialized) then
+      call endrun('nncorrector_timestep_init:: nncorrector NOT Initialized')
+    endif
+    
+    ! Get time step size
+    !--------------------
+    dtime = get_step_size()
+ 
+    ! Get Current time
+    !--------------------
+    call get_curr_date(Year,Month,Day,Sec)
+    YMD=(Year*10000) + (Month*100) + Day
+ 
+    !-------------------------------------------------------
+    ! Determine if the current time is AFTER the begining time
+    ! and if it is BEFORE the ending time.
+    !-------------------------------------------------------
+    YMD1=(Force_Beg_Year*10000) + (Force_Beg_Month*100) + Force_Beg_Day
+    call timemgr_time_ge(YMD1,Force_Beg_Sec,         &
+                         YMD ,Sec          ,After_Beg)
+ 
+    YMD1=(Force_End_Year*10000) + (Force_End_Month*100) + Force_End_Day
+    call timemgr_time_ge(YMD ,Sec,                    &
+                         YMD1,Force_End_Sec,Before_End)
+ 
+    !----------------------------------------------------------------
+    ! When past the NEXT time, Update corrector Arrays and time indices
+    !----------------------------------------------------------------
+    YMD1=(nnCorrector_Next_Year*10000) + (nnCorrector_Next_Month*100) + nnCorrector_Next_Day
+    call timemgr_time_ge(YMD1,nnCorrector_Next_Sec,            &
+                         YMD ,Sec           ,Update_Force)
+
+    ! write out the current time and Update_Force
+    ! write(iulog,*) 'nncorrector beginning: YMD', YMD, 'Update_Force', Update_Force, 'After_Beg', After_Beg, 'Before_End', Before_End, 'Force_ON', Force_ON
+ 
+    if((Before_End).and.(Update_Force)) then
+ 
+      ! Increment the Force times by the current interval
+      !---------------------------------------------------
+      nnCorrector_Curr_Year =nnCorrector_Next_Year
+      nnCorrector_Curr_Month=nnCorrector_Next_Month
+      nnCorrector_Curr_Day  =nnCorrector_Next_Day
+      nnCorrector_Curr_Sec  =nnCorrector_Next_Sec
+      YMD1=(nnCorrector_Curr_Year*10000) + (nnCorrector_Curr_Month*100) + nnCorrector_Curr_Day
+      call timemgr_time_inc(YMD1,nnCorrector_Curr_Sec,              &
+                            YMD2,nnCorrector_Next_Sec,Force_Step,0,0)
+      nnCorrector_Next_Year =(YMD2/10000)
+      YMD2            = YMD2-(nnCorrector_Next_Year*10000)
+      nnCorrector_Next_Month=(YMD2/100)
+      nnCorrector_Next_Day  = YMD2-(nnCorrector_Next_Month*100)
+  
+      call nncorrector_update(phys_state, cam_in)
+ 
+    endif ! ((Before_End).and.(Update_Force)) then
+ 
+    !----------------------------------------------------------------
+    ! Toggle corrector flag when the time interval is between 
+    ! beginning and ending times, and all of the analyses files exist.
+    !----------------------------------------------------------------
+    if((After_Beg).and.(Before_End)) then
+      nnCorrector_ON = .true.
+    else
+      nnCorrector_ON = .false.
+    endif
+    
+    ! write out the current time and Update_Force
+    ! write(iulog,*) 'nncorrector after update: YMD', YMD, 'Update_Force', Update_Force, 'After_Beg', After_Beg, 'Before_End', Before_End, 'Force_ON', Force_ON
+
+    !---------------------------------------------------
+    ! If Data arrays have changed update stepping arrays
+    !---------------------------------------------------
+    if((Before_End).and.(Update_Force)) then
+ 
+      ! Update the corrector tendencies
+      !--------------------------------
+      do lchnk=begchunk,endchunk
+        ncol=phys_state(lchnk)%ncol
+        nnCorrector_Ustep(:ncol,:pver,lchnk)=nnTarget_U(:ncol,:pver,lchnk)*Force_Utau(:ncol,:pver,lchnk)
+        nnCorrector_Vstep(:ncol,:pver,lchnk)=nnTarget_V(:ncol,:pver,lchnk)*Force_Vtau(:ncol,:pver,lchnk)
+        nnCorrector_Sstep(:ncol,:pver,lchnk)=nnTarget_S(:ncol,:pver,lchnk)*Force_Stau(:ncol,:pver,lchnk)
+        nnCorrector_Qstep(:ncol,:pver,lchnk)=nnTarget_Q(:ncol,:pver,lchnk)*Force_Qtau(:ncol,:pver,lchnk)
+      end do
+ 
+      if (masterproc) then
+         write(iulog,*)  'day, sec', nnCorrector_Curr_Day, nnCorrector_Curr_Sec
+         write(iulog,*) 'Force_Utau(1,20,1) = ', Force_Utau(1,20,begchunk)
+         write(iulog,*) 'nnTarget_U(1,20,1) = ', nnTarget_U(1,20,begchunk)
+         write(iulog,*) 'nnCorrector_Ustep(1,20,1) = ', nnCorrector_Ustep(1,20,begchunk)
+      end if
+ 
+    endif ! ((Before_End).and.(Update_Force)) then
+ 
+    ! End Routine
+    !------------
+    return
+  end subroutine ! nncorrector_timestep_init
+  !================================================================
+
+
+  !================================================================
+  subroutine nncorrector_timestep_tend(phys_state,phys_tend)
+   ! 
+   ! nncorrector_TIMESTEP_TEND: 
+   !                If nncorrector is ON, return the nncorrector contributions 
+   !                to forcing using the current contents of the Nudge 
+   !                arrays. Send output to the cam history module as well.
+   !===============================================================
+   use physconst    ,only: cpair
+   use physics_types,only: physics_state,physics_ptend,physics_ptend_init
+   use constituents ,only: cnst_get_ind,pcnst
+   use ppgrid       ,only: pver,pcols,begchunk,endchunk
+   use cam_history  ,only: outfld
+
+   ! Arguments
+   !-------------
+   type(physics_state), intent(in) :: phys_state
+   type(physics_ptend), intent(out):: phys_tend
+
+   ! Local values
+   !--------------------
+   integer indw,ncol,lchnk
+   logical lq(pcnst)
+
+   call cnst_get_ind('Q',indw)
+   lq(:)   =.false.
+   lq(indw)=.true.
+   call physics_ptend_init(phys_tend,phys_state%psetcols,'nncorrector',lu=.true.,lv=.true.,ls=.true.,lq=lq)
+
+   if(nnCorrector_ON) then
+     lchnk=phys_state%lchnk
+     ncol =phys_state%ncol
+     phys_tend%u(:ncol,:pver)     =nnCorrector_Ustep(:ncol,:pver,lchnk)
+     phys_tend%v(:ncol,:pver)     =nnCorrector_Vstep(:ncol,:pver,lchnk)
+     phys_tend%s(:ncol,:pver)     =nnCorrector_Sstep(:ncol,:pver,lchnk)
+     phys_tend%q(:ncol,:pver,indw)=nnCorrector_Qstep(:ncol,:pver,lchnk)
+
+     call outfld( 'nnCorr_U',phys_tend%u                ,pcols,lchnk)
+     call outfld( 'nnCorr_V',phys_tend%v                ,pcols,lchnk)
+     call outfld( 'nnCorr_T',phys_tend%s/cpair          ,pcols,lchnk)
+     call outfld( 'nnCorr_Q',phys_tend%q(1,1,indw)      ,pcols,lchnk)
+
+   endif
+
+   ! End Routine
+   !------------
+   return
+  end subroutine ! nncorrector_timestep_tend
   !================================================================
 
 
@@ -1208,6 +1607,55 @@ contains
   end subroutine ! corrector_update_analyses_fv
   !================================================================
 
+
+  !================================================================
+  subroutine init_neural_net()
+
+    implicit none
+
+    integer :: i, k
+
+    allocate(torch_mod (1))
+    call torch_mod(1)%load(trim(Force_torch_model), 0) !0 is not using gpu, for now just use cpu for NN inference
+    !call torch_mod(1)%load(trim(cb_torch_model), module_use_device) will use gpu if available
+    
+  end subroutine init_neural_net
+  !================================================================
+
+
+  !================================================================
+  subroutine nncorrector_update(phys_state, cam_in)
+    ! 
+    ! nncorrector_UPDATE: 
+    !                 generate NN predicted bias correctors of 
+    !                 U,V,T,Q, and PS values and then distribute
+    !                 the values to all of the chunks.
+    !===============================================================
+    use ppgrid ,only: pver,pcols,begchunk,endchunk
+    use netcdf
+    use constituents ,only: cnst_get_ind
+    use physics_types,only: physics_state
+    use camsrfexch     ,only: cam_in_t,cam_out_t
+    use radconstants,     only: nswbands, get_ref_solar_band_irrad
+    use rad_solar_var,    only: get_variability
+    use time_manager,     only: get_curr_calday
+    use phys_grid,        only: get_rlat_all_p, get_rlon_all_p
+    use cam_control_mod,  only: lambm0, obliqr, eccen, mvelpp
+    use shr_orb_mod,      only: shr_orb_decl, shr_orb_cosz
+    use solar_irrad_data, only: sol_tsi
+    use orbit,               only: zenith
+
+    ! Arguments
+    !-------------
+    type(physics_state), intent(in) :: phys_state(begchunk:endchunk)
+    type(cam_in_t),intent(in):: cam_in(begchunk:endchunk)
+
+    ! Local values
+    !-------------
+    
+    ! TODO
+    call endrun('nncorrector_update:: not implemented yet')
+  end subroutine ! nncorrector_update
 
   !================================================================
   subroutine corrector_set_profile(rlat,rlon,Force_prof,Wprof,nlev)

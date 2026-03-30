@@ -746,6 +746,7 @@ contains
     use cam_abortutils,     only: endrun
     use nudging,            only: Nudge_Model, nudging_init
     use corrector,          only: Force_Model, corrector_init
+    use corrector,          only: nnCorrector_Model, init_neural_net
     use conv_state_swap,    only: ConvStateSwap_Model, conv_state_swap_init
 
     ! Input/output arguments
@@ -917,7 +918,10 @@ contains
     if(Nudge_Model) call nudging_init
 
     ! Initialize Corrector
-    if(Force_Model) call corrector_init
+    if(Force_Model.or.nnCorrector_Model) call corrector_init
+
+    ! initialize the neural network (reading pt file) for NN corrector
+    if(nnCorrector_Model) call init_neural_net()
 
     ! Initialize Conv state swap
     if(ConvStateSwap_Model) call conv_state_swap_init
@@ -1108,6 +1112,7 @@ contains
     use iop_forcing,     only: scam_use_iop_srf
     use time_manager,       only: get_nstep
     use corrector,          only: Force_Model,Force_ON, corrector_timestep_tend,corrector_timestep_init
+    use corrector,          only: nnCorrector_Model,nnCorrector_ON, nncorrector_timestep_tend, nncorrector_timestep_init
     use check_energy,       only: check_energy_chng 
 #if ( defined OFFLINE_DYN )
     use metdata,         only: get_met_srf2
@@ -1176,6 +1181,7 @@ contains
     if(masterproc) then 
       write(iulog,*) 'previous replay location: nstep ', nstep 
     endif
+    ! state independent corrector
     if((Force_Model).and.(Force_ON)) then
       nstep = get_nstep()
       if(masterproc) then 
@@ -1189,11 +1195,32 @@ contains
         end do
       else
          if(masterproc) then 
-         write(iulog,*) "timestep 0 no update "
+         write(iulog,*) "State-Independent corrector: timestep 0 no update "
          endif 
       endif
       if(masterproc) then 
          write(iulog,*) "after force: phys_state(begchunk)%u: ", phys_state(begchunk)%u(1,20)
+      endif
+    endif
+    ! state dependent corrector
+    if((nnCorrector_Model).and.(nnCorrector_ON)) then
+      nstep = get_nstep()
+      if(masterproc) then 
+        write(iulog,*) "before nnCorrector: phys_state(begchunk)%u: ", phys_state(begchunk)%u(1,20)
+      endif
+      if (nstep > 0) then 
+        do c=begchunk,endchunk
+           call nncorrector_timestep_tend(phys_state(c),ptend)
+           call physics_update(phys_state(c),ptend,ztodt,phys_tend(c))
+           call check_energy_chng(phys_state(c), phys_tend(c), "corrector", nstep, ztodt, zero, zero, zero, zero)
+        end do
+      else
+         if(masterproc) then 
+         write(iulog,*) "State-Dependent corrector: timestep 0 no update "
+         endif 
+      endif
+      if(masterproc) then 
+         write(iulog,*) "after nnCorrector: phys_state(begchunk)%u: ", phys_state(begchunk)%u(1,20)
       endif
     endif
     ! update analysis and timestep for one step after timestep_tend
@@ -1201,6 +1228,7 @@ contains
        write(iulog,*) "corrector timestep init "
     endif
     if (Force_Model) call corrector_timestep_init(phys_state)
+    if (nnCorrector_Model) call nncorrector_timestep_init(phys_state, cam_in)
 
     do c=begchunk,endchunk
        ncol = get_ncols_p(c)
