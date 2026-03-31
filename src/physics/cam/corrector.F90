@@ -1724,7 +1724,7 @@ contains
     plev = pver
 
     calday  = get_curr_calday()
-    toy_day = max(1, min(366, int(calday + 1.0e-8_r3)))
+    toy_day = max(1, min(366, int(calday + 1.0e-3_r8)))
 
     ! Zeyuan Hu 12/23/2024: gather global state variables
     !---------------------------------------------------
