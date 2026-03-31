@@ -241,6 +241,12 @@ module corrector
   integer          :: nn_inputlength  = 197     ! length of NN input vector
   integer          :: nn_outputlength = 104     ! length of NN output vector
   type(torch_module), allocatable :: torch_mod(:)
+  
+  ! nncorrector perfect model test
+  logical          :: nnCorrector_Target_From_File = .false.
+  character(len=cl):: nnCorrector_Target_Path
+  character(len=cs):: nnCorrector_Target_File,nnCorrector_Target_Template
+  integer          :: nnCorrector_Target_StepinFile = -1
 
   ! corrector State Arrays
   !-----------------------
@@ -341,7 +347,10 @@ contains
                          Force_Vwin_Ldelta,Force_Vwin_Hdelta,          &
                          Force_Vwin_Invert,                            &
                          nnCorrector_Model,                            &
-                         Force_torch_model, NN_Data_Save
+                         Force_torch_model, NN_Data_Save,              &
+                         nnCorrector_Target_From_File,nnCorrector_Target_Path, &
+                         nnCorrector_Target_File,nnCorrector_Target_Template
+                         
 
    ! corrector is NOT initialized yet, For now
    ! corrector will always begin/end at midnight.
@@ -400,6 +409,11 @@ contains
    nnCorrector_Model = .false.
    Force_torch_model = '/n/holylfs06/LABS/kuang_lab/Lab/kuanglfs/zeyuanhu/climcorr/swin_test_dim1024_depth8_v2_2nodes_r4.pt'
    NN_Data_Save = .false.
+
+   ! nnCorrector perfect model test defaults
+   nnCorrector_Target_From_File = .false.
+   nnCorrector_Target_Path = '/n/home04/sweidman/holylfs06/CESM215_out/Run/archive/camreplay_nudgeforce1/atm/hist/'
+   nnCorrector_Target_Template = 'camreplay_nudgeforce1.cam.h1.%y-%m-%d-%s.nc'
 
    ! Read in namelist values
    !------------------------
@@ -527,6 +541,10 @@ contains
    call mpibcast(nnCorrector_Initialized, 1, mpilog, 0, mpicom) 
    call mpibcast(Force_torch_model  , len(Force_torch_model), mpichar, 0, mpicom)
    call mpibcast(NN_Data_Save       , 1, mpilog, 0, mpicom)
+
+   call mpibcast(nnCorrector_Target_From_File, 1, mpilog, 0, mpicom)
+   call mpibcast(nnCorrector_Target_Path, len(nnCorrector_Target_Path), mpichar, 0, mpicom)
+   call mpibcast(nnCorrector_Target_Template, len(nnCorrector_Target_Template), mpichar, 0, mpicom)
 
 #endif
 
@@ -845,6 +863,10 @@ contains
      write(iulog,*) 'corrector: Force_torch_model   =',trim(Force_torch_model)
      write(iulog,*) 'corrector: NN_Data_Save        =',NN_Data_Save
 
+     write(iulog,*) 'corrector: nnCorrector_Target_From_File =',nnCorrector_Target_From_File
+     write(iulog,*) 'corrector: nnCorrector_Target_Path      =',trim(nnCorrector_Target_Path)
+     write(iulog,*) 'corrector: nnCorrector_Target_Template  =',trim(nnCorrector_Target_Template)
+
    endif ! (masterproc) then
 
    ! Broadcast other variables that have changed
@@ -900,7 +922,7 @@ contains
      endif
    
      call corrector_update_analyses_fv (trim(Force_Path)//trim(Force_File))
-   end if
+   end if 
 
    ! Initialize corrector Coeffcient profiles in local arrays
    ! Load zeros into corrector arrays
@@ -1279,7 +1301,19 @@ contains
       nnCorrector_Next_Month=(YMD2/100)
       nnCorrector_Next_Day  = YMD2-(nnCorrector_Next_Month*100)
   
-      call nncorrector_update(phys_state, cam_in)
+      if (nnCorrector_Target_From_File) then
+        ! generate filename. Note that target files have time marks 00000 or 43200,
+        ! so each file contains two 6-hr steps at 2nd and 5th step of the file (1-indexed)
+        nnCorrector_Target_File=""! TODO: generate filename based on current time and template
+        nnCorrector_Target_StepinFile=-1 ! TODO: determine if step in file is 2 or 5 (1-indexed) based on current time
+        if(masterproc) then
+          write(iulog,*) 'nncorrector: Reading target fields:',trim(nnCorrector_Target_Path)//trim(nnCorrector_Target_File)
+          write(iulog,*) 'nncorrector: nnCorrector_Target_StepinFile=', nnCorrector_Target_StepinFile
+        endif
+        call nncorrector_update_from_file(trim(nnCorrector_Target_Path)//trim(nnCorrector_Target_File), nnCorrector_Target_StepinFile)
+      else
+        call nncorrector_update(phys_state, cam_in)
+      endif
  
     endif ! ((Before_End).and.(Update_Force)) then
  
@@ -1599,6 +1633,30 @@ contains
   end subroutine ! corrector_update_analyses_fv
   !================================================================
 
+
+  !================================================================
+  subroutine nncorrector_update_from_file(target_file, target_stepinfile)
+    ! 
+    ! nncorrector_UPDATE_FROM_FILE: 
+    !                 Open the given replay data file, read in 
+    !                 U,V,T,Q correction values and then distribute
+    !                 the values to all of the chunks.
+    !===============================================================
+    use ppgrid ,only: pver,begchunk
+    use netcdf
+
+    ! Arguments
+    !-------------
+    character(len=*),intent(in) :: target_file
+    integer,         intent(in) :: target_stepinfile
+
+    ! Local values
+    !-------------
+
+    ! TODO
+    call endrun('nncorrector_update_from_file is not implemented yet.')
+  end subroutine ! nncorrector_update_from_file
+  !================================================================
 
   !================================================================
   subroutine init_neural_net()

@@ -921,7 +921,7 @@ contains
     if(Force_Model.or.nnCorrector_Model) call corrector_init
 
     ! initialize the neural network (reading pt file) for NN corrector
-    if(nnCorrector_Model) call init_neural_net()
+    if(nnCorrector_Model.and.(.not.nnCorrector_Target_From_File)) call init_neural_net()
 
     ! Initialize Conv state swap
     if(ConvStateSwap_Model) call conv_state_swap_init
