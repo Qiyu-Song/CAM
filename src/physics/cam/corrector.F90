@@ -176,7 +176,7 @@ module corrector
   private
 
   public:: Force_Model,Force_ON
-  public:: nnCorrector_Model,nnCorrector_ON
+  public:: nnCorrector_Model,nnCorrector_ON,nnCorrector_Target_From_File
   public:: corrector_readnl
   public:: corrector_init
   public:: corrector_timestep_init

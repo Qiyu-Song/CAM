@@ -746,7 +746,7 @@ contains
     use cam_abortutils,     only: endrun
     use nudging,            only: Nudge_Model, nudging_init
     use corrector,          only: Force_Model, corrector_init
-    use corrector,          only: nnCorrector_Model, init_neural_net
+    use corrector,          only: nnCorrector_Model, init_neural_net, nnCorrector_Target_From_File
     use conv_state_swap,    only: ConvStateSwap_Model, conv_state_swap_init
 
     ! Input/output arguments
