@@ -349,7 +349,7 @@ contains
                          nnCorrector_Model,                            &
                          Force_torch_model, NN_Data_Save,              &
                          nnCorrector_Target_From_File,nnCorrector_Target_Path, &
-                         nnCorrector_Target_File,nnCorrector_Target_Template
+                         nnCorrector_Target_Template
                          
 
    ! corrector is NOT initialized yet, For now
