@@ -1247,6 +1247,7 @@ contains
     integer                 kk
     real(r8)                Sbar,Qbar,Wsum
     integer                 dtime
+    integer                 file_sec
 
     ! Check if corrector is initialized
     !---------------------------------
@@ -1304,8 +1305,25 @@ contains
       if (nnCorrector_Target_From_File) then
         ! generate filename. Note that target files have time marks 00000 or 43200,
         ! so each file contains two 6-hr steps at 2nd and 5th step of the file (1-indexed)
-        nnCorrector_Target_File=""! TODO: generate filename based on current time and template
-        nnCorrector_Target_StepinFile=-1 ! TODO: determine if step in file is 2 or 5 (1-indexed) based on current time
+        if (nnCorrector_Curr_Sec < 43200) then
+          file_Sec = 0
+        else
+          file_Sec = 43200
+        endif
+        nnCorrector_Target_File = interpret_filename_spec( nnCorrector_Target_Template, &
+                                          yr_spec=nnCorrector_Curr_Year , &
+                                          mon_spec=nnCorrector_Curr_Month, &
+                                          day_spec=nnCorrector_Curr_Day  , &
+                                          sec_spec=file_Sec    )
+        if (nnCorrector_Curr_Sec - file_Sec == 0) then
+          nnCorrector_Target_StepinFile = 2
+        elseif (nnCorrector_Curr_Sec - file_Sec == 21600) then
+          nnCorrector_Target_StepinFile = 5
+        else
+          write(iulog,*) 'nnCorrector_Curr_Sec = ', nnCorrector_Curr_Sec
+          write(iulog,*) 'file_Sec             = ', file_Sec
+          call endrun('nncorrector_timestep_init: unexpected Curr_Sec/file_Sec offset')
+        endif
         if(masterproc) then
           write(iulog,*) 'nncorrector: Reading target fields:',trim(nnCorrector_Target_Path)//trim(nnCorrector_Target_File)
           write(iulog,*) 'nncorrector: nnCorrector_Target_StepinFile=', nnCorrector_Target_StepinFile
