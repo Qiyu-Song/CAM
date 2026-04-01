@@ -1652,11 +1652,160 @@ contains
 
     ! Local values
     !-------------
+    integer :: nlon, nlat, plev, istat
+    integer :: ncid, varid
+    integer :: ilat, ilon, ilev
+    integer :: start4(4), count4(4)
+    real(r8) :: Xanal(Force_nlon,Force_nlat,Force_nlev)
+    real(r8) :: Xtrans(Force_nlon,Force_nlev,Force_nlat)
+    logical  :: file_present
 
-    ! TODO
-    call endrun('nncorrector_update_from_file is not implemented yet.')
+    ! Rotate Force_ObsInd() indices, then check the existence of the analyses 
+    ! file; broadcast the updated indices and file status to all the other MPI nodes. 
+    ! If the file is not there, then just return.
+    !------------------------------------------------------------------------
+    if (masterproc) then
+    inquire(file=trim(target_file), exist=file_present)
+      write(iulog,*) 'nncorrector: target_file=', trim(target_file)
+      write(iulog,*) 'nncorrector: target_stepinfile=', target_stepinfile
+      write(iulog,*) 'nncorrector: file_present=', file_present
+    end if
+#ifdef SPMD
+   call mpibcast(file_present, 1, mpilog, 0, mpicom)
+#endif
+    if (.not. file_present) then
+      call endrun('nncorrector_update_from_file: target file missing')
+    end if
+
+    ! masterporc does all of the work here
+    !-----------------------------------------
+    if (masterproc) then
+
+      ! Open the given file
+      !-----------------------
+      istat = nf90_open(trim(target_file), NF90_NOWRITE, ncid)
+      if (istat .ne. NF90_NOERR) then
+        write(iulog,*) 'NF90_OPEN: failed for file ', trim(target_file)
+        write(iulog,*) nf90_strerror(istat)
+        call endrun('nncorrector_update_from_file: nf90_open failed')
+      end if
+
+      ! Read in Dimensions
+      !--------------------
+      istat = nf90_inq_dimid(ncid, 'lon', varid)
+      if(istat.ne.NF90_NOERR) then
+        write(iulog,*) nf90_strerror(istat)
+        call endrun('nncorrector_update_from_file: nf90_inq_dimid lon failed')
+      end if
+      istat = nf90_inquire_dimension(ncid, varid, len=nlon)
+      if(istat.ne.NF90_NOERR) then
+        write(iulog,*) nf90_strerror(istat)
+        call endrun('nncorrector_update_from_file: nf90_inquire_dimension lon failed')
+      end if
+
+      istat = nf90_inq_dimid(ncid, 'lat', varid)
+      if(istat.ne.NF90_NOERR) then
+        write(iulog,*) nf90_strerror(istat)
+        call endrun('nncorrector_update_from_file: nf90_inq_dimid lat failed')
+      end if
+      istat = nf90_inquire_dimension(ncid, varid, len=nlat)
+      if(istat.ne.NF90_NOERR) then
+        write(iulog,*) nf90_strerror(istat)
+        call endrun('nncorrector_update_from_file: nf90_inquire_dimension lat failed')
+      end if
+
+      istat = nf90_inq_dimid(ncid, 'lev', varid)
+      if(istat.ne.NF90_NOERR) then
+        write(iulog,*) nf90_strerror(istat)
+        call endrun('nncorrector_update_from_file: nf90_inq_dimid lev failed')
+      end if
+      istat = nf90_inquire_dimension(ncid, varid, len=plev)
+      if(istat.ne.NF90_NOERR) then
+        write(iulog,*) nf90_strerror(istat)
+        call endrun('nncorrector_update_from_file: nf90_inquire_dimension lev failed')
+      end if
+
+      if((Force_nlon.ne.nlon).or.(Force_nlat.ne.nlat).or.(plev.ne.pver)) then
+        write(iulog,*) 'ERROR: nncorrector_update_from_file: nlon=',nlon,' Force_nlon=',Force_nlon
+        write(iulog,*) 'ERROR: nncorrector_update_from_file: nlat=',nlat,' Force_nlat=',Force_nlat
+        write(iulog,*) 'ERROR: nncorrector_update_from_file: plev=',plev,' pver=',pver
+        call endrun('nncorrector_update_from_file: analyses dimension mismatch')
+      end if
+
+      ! assuming variable dims are (lon, lat, lev, time)
+      start4 = (/1, 1, 1, target_stepinfile/)
+      count4 = (/nlon, nlat, plev, 1/)
+
+      call read_one_target_var(ncid, 'UDIFF', start4, count4, Xanal, Xtrans)
+
+    end if ! masterproc
+    call scatter_field_to_chunk(1, Force_nlev, 1, Force_nlon, Xtrans, &
+                                nnTarget_U(1,1,begchunk))
+    
+    if (masterproc) then
+      call read_one_target_var(ncid, 'VDIFF', start4, count4, Xanal, Xtrans)
+    end if ! masterproc
+    call scatter_field_to_chunk(1, Force_nlev, 1, Force_nlon, Xtrans, &
+                                nnTarget_V(1,1,begchunk))
+
+    if (masterproc) then
+      call read_one_target_var(ncid, 'SDIFF', start4, count4, Xanal, Xtrans)
+    end if ! masterproc
+    call scatter_field_to_chunk(1, Force_nlev, 1, Force_nlon, Xtrans, &
+                                nnTarget_S(1,1,begchunk))
+
+    if (masterproc) then
+      call read_one_target_var(ncid, 'QDIFF', start4, count4, Xanal, Xtrans)
+      istat = nf90_close(ncid)
+      if (istat .ne. NF90_NOERR) then
+        write(iulog,*) nf90_strerror(istat)
+        call endrun('nncorrector_update_from_file: nf90_close failed')
+      end if
+    end if ! masterproc
+    call scatter_field_to_chunk(1, Force_nlev, 1, Force_nlon, Xtrans, &
+                                nnTarget_Q(1,1,begchunk))
+
+    ! End Routine
+    !------------
+    return
   end subroutine ! nncorrector_update_from_file
   !================================================================
+
+
+  !================================================================
+  subroutine read_one_target_var(ncid, vname, start4, count4, Xanal, Xtrans)
+    use netcdf
+    integer,          intent(in)  :: ncid
+    character(len=*), intent(in)  :: vname
+    integer,          intent(in)  :: start4(4), count4(4)
+    real(r8),         intent(out) :: Xanal(Force_nlon,Force_nlat,Force_nlev)
+    real(r8),         intent(out) :: Xtrans(Force_nlon,Force_nlev,Force_nlat)
+
+    integer :: varid, istat
+    integer :: ilat, ilev, ilon
+
+    istat = nf90_inq_varid(ncid, trim(vname), varid)
+    if (istat .ne. NF90_NOERR) then
+      write(iulog,*) nf90_strerror(istat)
+      call endrun('read_one_target_var: missing variable '//trim(vname))
+    end if
+
+    istat = nf90_get_var(ncid, varid, Xanal, start=start4, count=count4)
+    if (istat .ne. NF90_NOERR) then
+      write(iulog,*) nf90_strerror(istat)
+      call endrun('read_one_target_var: nf90_get_var failed for '//trim(vname))
+    end if
+
+    do ilat = 1, Force_nlat
+    do ilev = 1, Force_nlev
+    do ilon = 1, Force_nlon
+      Xtrans(ilon,ilev,ilat) = Xanal(ilon,ilat,ilev)
+    end do
+    end do
+    end do
+  end subroutine ! read_one_target_var
+  !================================================================
+
 
   !================================================================
   subroutine init_neural_net()
