@@ -1755,6 +1755,7 @@ contains
       count4 = (/nlon, nlat, plev, 1/)
 
       call read_one_target_var(ncid, 'UDIFF', start4, count4, Xanal, Xtrans)
+      Xtrans(:,1,:) = 0.0_r8 ! set uppermost level to 0 as in replay
 
     end if ! masterproc
     call scatter_field_to_chunk(1, Force_nlev, 1, Force_nlon, Xtrans, &
@@ -1762,18 +1763,21 @@ contains
     
     if (masterproc) then
       call read_one_target_var(ncid, 'VDIFF', start4, count4, Xanal, Xtrans)
+      Xtrans(:,1,:) = 0.0_r8 ! set uppermost level to 0 as in replay
     end if ! masterproc
     call scatter_field_to_chunk(1, Force_nlev, 1, Force_nlon, Xtrans, &
                                 nnTarget_V(1,1,begchunk))
 
     if (masterproc) then
       call read_one_target_var(ncid, 'SDIFF', start4, count4, Xanal, Xtrans)
+      Xtrans(:,1,:) = 0.0_r8 ! set uppermost level to 0 as in replay
     end if ! masterproc
     call scatter_field_to_chunk(1, Force_nlev, 1, Force_nlon, Xtrans, &
                                 nnTarget_S(1,1,begchunk))
 
     if (masterproc) then
       call read_one_target_var(ncid, 'QDIFF', start4, count4, Xanal, Xtrans)
+      Xtrans(:,1,:) = 0.0_r8 ! set uppermost level to 0 as in replay
       istat = nf90_close(ncid)
       if (istat .ne. NF90_NOERR) then
         write(iulog,*) nf90_strerror(istat)
