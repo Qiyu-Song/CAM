@@ -1927,6 +1927,7 @@ contains
     integer :: n,i,j,k
     type(torch_tensor_wrap) :: input_tensors
     type(torch_tensor) :: out_tensor
+    real(real32), target :: nn_dummy_tensor_data(1)   ! keeps out_tensor's handle valid on non-master ranks
     real(real32) :: input_torch(144, 96, nn_inputlength, 1)
     real(real32), pointer :: output_torch(:, :, :, :)
     
@@ -2237,10 +2238,25 @@ contains
     endif ! (masterproc) then
 
     ! run the NN inference
+    ! Only masterproc holds the gathered global field (non-master input_torch is zeros above) and
+    ! every read of output_torch below is inside an if(masterproc) block, so the forward pass on
+    ! the other ranks was pure waste: npes redundant global 96x144 inferences per call, all
+    ! discarded, contending for node memory bandwidth (24 s/call clean vs 36-40 s/call in situ).
+    !
+    ! Non-master ranks must still end up with a VALID out_tensor: torch_tensor has
+    ! "final :: torch_tensor_free", and that finalizer calls torch_tensor_free_cpp(this%handle)
+    ! with no null check, so a never-populated handle segfaults at scope exit. (Guarding the
+    ! forward without this killed tasks 1-npes while rank 0 survived.) from_array on a 1-element
+    ! array gives them a real handle at negligible cost.
     call input_tensors%create
     call input_tensors%add_array(input_torch)
-    call torch_mod(1)%forward(input_tensors, out_tensor, flags=module_use_inference_mode)
-    call out_tensor%to_array(output_torch)
+    if (masterproc) then
+      call torch_mod(1)%forward(input_tensors, out_tensor, flags=module_use_inference_mode)
+      call out_tensor%to_array(output_torch)
+    else
+      nn_dummy_tensor_data(1) = 0.0_real32
+      call out_tensor%from_array(nn_dummy_tensor_data)
+    endif ! (masterproc) then
 
     ! mapping nn output to the forcing arrays 
     if (masterproc) then 
