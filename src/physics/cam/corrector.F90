@@ -240,6 +240,15 @@ module corrector
   logical          :: NN_Data_Save = .false.
   integer          :: nn_inputlength  = 197     ! length of NN input vector
   integer          :: nn_outputlength = 104     ! length of NN output vector
+
+  ! Sidecar inference: when CORRECTOR_SIDECAR_DIR is set, the forward pass is
+  ! handed to a persistent external process over a filesystem handshake instead
+  ! of running libtorch inside CAM. Off unless the env var is set.
+  logical                        :: nn_sidecar_on  = .false.
+  character(len=256)             :: nn_sidecar_dir = ''
+  integer                        :: nn_sidecar_seq = 0
+  real(r8)                       :: nn_sidecar_timeout = 900._r8
+  real(real32), allocatable, target :: nn_sidecar_out(:,:,:,:)
   type(torch_module), allocatable :: torch_mod(:)
   
   ! nncorrector perfect model test
@@ -1830,11 +1839,116 @@ contains
 
 
   !================================================================
+  !================================================================
+  subroutine nn_unlink(fname)
+    ! Remove a file if it is there; silently do nothing if it is not.
+    character(len=*), intent(in) :: fname
+    integer :: u, ios
+    open(newunit=u, file=trim(fname), status='old', iostat=ios)
+    if (ios == 0) close(u, status='delete')
+  end subroutine nn_unlink
+  !================================================================
+
+  subroutine nn_sidecar_exchange(inp, outp, n1, n2, nin, nout)
+    ! Ship one inference request to the persistent sidecar and wait for the
+    ! answer. masterproc only.
+    !
+    ! The server side of this protocol lives OUTSIDE this repo, in
+    !   github.com/Qiyu-Song/ClimCorrector  ->  sidecar/
+    ! (infer_server.py + PROTOCOL.md). The wire format is specified there and is
+    ! duplicated here by necessity; if you change filenames, dimension order,
+    ! endianness or channel counts, change BOTH. The server validates the request
+    ! element count, so a size mismatch fails loudly -- a layout or endianness
+    ! mismatch does NOT, and produces plausible-looking garbage. Raw float32 stream I/O: the Fortran column-major
+    ! layout of (nlon,nlat,nchan,1) is byte-identical to the C-order
+    ! (1,nchan,nlat,nlon) tensor the server feeds the model, so neither side
+    ! transposes anything. The .ready marker is the commit point, so a
+    ! partially written .bin is never read.
+    !===============================================================
+    integer,      intent(in)  :: n1, n2, nin, nout
+    ! Explicit shape on purpose: with assumed-shape dummies the unformatted
+    ! stream write emitted an uninitialized compiler temporary (correct byte
+    ! count, garbage contents) while the array itself was intact. Explicit
+    ! shape forces sequence association with the caller's actual storage.
+    real(real32), intent(in)  :: inp(n1,n2,nin,1)
+    real(real32), intent(out) :: outp(n1,n2,nout,1)
+
+    character(len=320) :: fbin, fready, rbin, rready
+    character(len=8)   :: seq
+    integer            :: u, cnt0, cnt1, rate, spin0, spin1
+    logical            :: got
+    real(r8)           :: waited
+
+    nn_sidecar_seq = nn_sidecar_seq + 1
+    write(seq,'(I8.8)') nn_sidecar_seq
+    fbin   = trim(nn_sidecar_dir)//'/req_'//seq//'.bin'
+    fready = trim(nn_sidecar_dir)//'/req_'//seq//'.ready'
+    rbin   = trim(nn_sidecar_dir)//'/resp_'//seq//'.bin'
+    rready = trim(nn_sidecar_dir)//'/resp_'//seq//'.ready'
+
+    open(newunit=u, file=trim(fbin), form='unformatted', access='stream', &
+         status='replace', action='write')
+    write(u) inp
+    close(u)
+    open(newunit=u, file=trim(fready), status='replace', action='write')
+    close(u)
+
+    call system_clock(cnt0, rate)
+    waited = 0._r8
+    do
+      inquire(file=trim(rready), exist=got)
+      if (got) exit
+      call system_clock(cnt1)
+      waited = real(cnt1-cnt0,r8)/real(rate,r8)
+      if (waited > nn_sidecar_timeout) then
+        call endrun('nnCorrector sidecar: timed out waiting for '//trim(rready))
+      end if
+      ! ~20 ms pause so polling does not hammer the filesystem metadata server
+      call system_clock(spin0)
+      do
+        call system_clock(spin1)
+        if (real(spin1-spin0,r8)/real(rate,r8) > 0.02_r8) exit
+      end do
+    end do
+
+    open(newunit=u, file=trim(rbin), form='unformatted', access='stream', &
+         status='old', action='read')
+    read(u) outp
+    close(u)
+
+    ! Delete only what we consumed: the sidecar owns and removes the request
+    ! files. Tolerate a missing file rather than aborting -- a bare
+    ! open(status='old') on an already-removed file is a fatal runtime error.
+    call nn_unlink(rready)
+    call nn_unlink(rbin)
+
+    write(iulog,*) 'nnCorrector sidecar: seq ', seq, ' round trip ', waited, ' s'
+  end subroutine nn_sidecar_exchange
+  !================================================================
+
+
   subroutine init_neural_net()
 
     implicit none
 
     integer :: i, k
+    integer :: ios
+
+    call get_environment_variable('CORRECTOR_SIDECAR_DIR', nn_sidecar_dir, status=ios)
+    nn_sidecar_on = (ios == 0 .and. len_trim(nn_sidecar_dir) > 0 .and. &
+                     trim(nn_sidecar_dir) /= 'None')   ! CIME writes 'None' for an empty xml value
+    if (nn_sidecar_on) then
+      ! No in-process model: this also avoids holding one copy of the weights
+      ! per MPI rank, which is what the in-process path does today.
+      if (masterproc) then
+        write(iulog,*) 'nnCorrector: SIDECAR mode, exchange dir = ', trim(nn_sidecar_dir)
+      end if
+      ! Falls through to the model load below. Skipping the load would save one
+      ! copy of the weights per MPI rank and was verified to give identical
+      ! results, so it is safe to add; it is left in only because the validated
+      ! configuration was built this way. The FTZ/DAZ parity that matters is on
+      ! the SERVER side (torch.set_flush_denormal), not here.
+    end if
 
     allocate(torch_mod (1))
     call torch_mod(1)%load(trim(Force_torch_model), 0) !0 is not using gpu, for now just use cpu for NN inference
@@ -2249,14 +2363,28 @@ contains
     ! forward without this killed tasks 1-npes while rank 0 survived.) from_array on a 1-element
     ! array gives them a real handle at negligible cost.
     call input_tensors%create
-    call input_tensors%add_array(input_torch)
-    if (masterproc) then
-      call torch_mod(1)%forward(input_tensors, out_tensor, flags=module_use_inference_mode)
-      call out_tensor%to_array(output_torch)
-    else
+    if (nn_sidecar_on) then
+      if (masterproc) then
+        if (.not. allocated(nn_sidecar_out)) &
+             allocate(nn_sidecar_out(144, 96, nn_outputlength, 1))
+        call nn_sidecar_exchange(input_torch, nn_sidecar_out, &
+                                 144, 96, nn_inputlength, nn_outputlength)
+        output_torch => nn_sidecar_out
+      end if
+      ! Every rank still needs a valid handle here: torch_tensor's finalizer
+      ! frees this%handle unconditionally, so a null handle segfaults at scope exit.
       nn_dummy_tensor_data(1) = 0.0_real32
       call out_tensor%from_array(nn_dummy_tensor_data)
-    endif ! (masterproc) then
+    else
+      call input_tensors%add_array(input_torch)
+      if (masterproc) then
+        call torch_mod(1)%forward(input_tensors, out_tensor, flags=module_use_inference_mode)
+        call out_tensor%to_array(output_torch)
+      else
+        nn_dummy_tensor_data(1) = 0.0_real32
+        call out_tensor%from_array(nn_dummy_tensor_data)
+      endif ! (masterproc) then
+    end if
 
     ! mapping nn output to the forcing arrays 
     if (masterproc) then 
