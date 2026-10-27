@@ -256,6 +256,7 @@ module corrector
   ! server exits while CAM is still waiting and the wait can never be satisfied.
   real(r8)                       :: nn_sidecar_timeout = 3600._r8
   real(real32), allocatable, target :: nn_sidecar_out(:,:,:,:)
+  logical                        :: solin_logged = .false.   ! log the SOLIN TSI once per run
   type(torch_module), allocatable :: torch_mod(:)
   
   ! nncorrector perfect model test
@@ -1994,7 +1995,7 @@ contains
     use phys_grid,        only: get_rlat_all_p, get_rlon_all_p
     use cam_control_mod,  only: lambm0, obliqr, eccen, mvelpp
     use shr_orb_mod,      only: shr_orb_decl, shr_orb_cosz
-    use solar_irrad_data, only: sol_tsi
+    use solar_irrad_data, only: sol_tsi, do_spctrl_scaling
     use orbit,               only: zenith
 
     ! Arguments
@@ -2113,9 +2114,24 @@ contains
       Model_state_lon(:ncol,lchnk)=phys_state(lchnk)%lon(:ncol)*(180./pi)
     end do
 
-    ! call get_ref_solar_band_irrad( solar_band_irrad ) ! this can move to init subroutine
-    tot_irrad = sol_tsi
-    call get_variability(sfac)                        ! "
+    ! TSI for the SOLIN input, computed the way radiation computes SOLIN (radsw.F90:
+    ! solin = sum(sfac*solar_band_irrad)*eccf*coszrs), which is what the training data saw.
+    ! With solar_htng_spctrl_scl=.true. (CAM6 default) solar_irrad_data never sets sol_tsi,
+    ! so it keeps its default of -1 and the old tot_irrad = sol_tsi fed the NN a night-side,
+    ! O(1) W/m2 SOLIN. The spectral path is used only in that case, so runs with a constant
+    ! solar_const (SPCAM) keep tot_irrad = sol_tsi bit for bit.
+    call get_variability(sfac)
+    if (do_spctrl_scaling) then
+      call get_ref_solar_band_irrad( solar_band_irrad )
+      tot_irrad = sum(sfac(:)*solar_band_irrad(:))
+    else
+      tot_irrad = sol_tsi
+    end if
+    if (tot_irrad <= 0._r8) call endrun('corrector: non-positive TSI for the nnCorrector SOLIN input')
+    if (masterproc .and. .not. solin_logged) then
+      write(iulog,*) 'nnCorrector: SOLIN tot_irrad (W/m2) = ', tot_irrad, ' spectral = ', do_spctrl_scaling
+      solin_logged = .true.
+    end if
     do lchnk=begchunk,endchunk
       ncol = phys_state(lchnk)%ncol
       ! calday = get_curr_calday() ! get current calendar day; no time offset as was in E3SM, need to double check!
