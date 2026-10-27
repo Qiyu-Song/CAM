@@ -247,7 +247,14 @@ module corrector
   logical                        :: nn_sidecar_on  = .false.
   character(len=256)             :: nn_sidecar_dir = ''
   integer                        :: nn_sidecar_seq = 0
-  real(r8)                       :: nn_sidecar_timeout = 900._r8
+  ! Seconds to wait for one sidecar response before aborting the run. RC reports
+  ! holylfs06 OST service threads stuck 15+ min under journal-bound latency, which is
+  ! exactly the old 900 s value -- a single stall at that tail killed the whole coupled
+  ! job via endrun below. 3600 s turns an allocation loss into a throughput loss.
+  ! Override at runtime with CORRECTOR_SIDECAR_TIMEOUT (seconds) -- no rebuild needed.
+  ! CONSTRAINT: the server's SIDECAR_MAX_IDLE must stay GREATER than this, or the
+  ! server exits while CAM is still waiting and the wait can never be satisfied.
+  real(r8)                       :: nn_sidecar_timeout = 3600._r8
   real(real32), allocatable, target :: nn_sidecar_out(:,:,:,:)
   type(torch_module), allocatable :: torch_mod(:)
   
@@ -1933,6 +1940,8 @@ contains
 
     integer :: i, k
     integer :: ios
+    integer :: ios_to
+    character(len=32) :: tbuf
 
     call get_environment_variable('CORRECTOR_SIDECAR_DIR', nn_sidecar_dir, status=ios)
     nn_sidecar_on = (ios == 0 .and. len_trim(nn_sidecar_dir) > 0 .and. &
@@ -1940,8 +1949,16 @@ contains
     if (nn_sidecar_on) then
       ! No in-process model: this also avoids holding one copy of the weights
       ! per MPI rank, which is what the in-process path does today.
+      ! Optional runtime override of the request timeout. Anything unparseable or
+      ! non-positive falls back to the compiled default rather than disabling the guard.
+      call get_environment_variable('CORRECTOR_SIDECAR_TIMEOUT', tbuf, status=ios_to)
+      if (ios_to == 0 .and. len_trim(tbuf) > 0 .and. trim(tbuf) /= 'None') then
+        read(tbuf, *, iostat=ios_to) nn_sidecar_timeout
+        if (ios_to /= 0 .or. nn_sidecar_timeout <= 0._r8) nn_sidecar_timeout = 3600._r8
+      end if
       if (masterproc) then
         write(iulog,*) 'nnCorrector: SIDECAR mode, exchange dir = ', trim(nn_sidecar_dir)
+        write(iulog,*) 'nnCorrector: SIDECAR request timeout (s) = ', nn_sidecar_timeout
       end if
       ! Falls through to the model load below. Skipping the load would save one
       ! copy of the weights per MPI rank and was verified to give identical
