@@ -1883,7 +1883,15 @@ contains
 
     character(len=320) :: fbin, fready, rbin, rready
     character(len=8)   :: seq
-    integer            :: u, cnt0, cnt1, rate, spin0, spin1
+    integer            :: u
+    ! 64-bit on purpose. With default (32-bit) integers ifort's system_clock counts
+    ! mod(epoch seconds, 214748)*10000, so it wraps every 59.65 h at the SAME wall-clock
+    ! instant on every node. A wait that spans the wrap never leaves the 20 ms spin below
+    ! (spin1-spin0 can no longer exceed the threshold) and the timeout never fires because
+    ! waited goes negative: CAM hangs silently until the job's wall limit. This hung
+    ! members on 2026-10-22 20:45 and 2026-10-27 20:03. The 64-bit counter is epoch
+    ! microseconds and does not wrap.
+    integer(int64)     :: cnt0, cnt1, rate, spin0, spin1
     logical            :: got
     real(r8)           :: waited
 
